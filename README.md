@@ -1,10 +1,10 @@
 # GitHub Release Monitor
 
-A powerful, self-hostable application to automatically monitor GitHub and Codeberg repository releases and receive instant email or Apprise notifications. Keep track of your favorite projects without manually checking for updates.
+A powerful, self-hostable application to automatically monitor GitHub, GitLab, and Codeberg repository releases and receive instant email or Apprise notifications. Keep track of your favorite projects without manually checking for updates.
 
 ## ✨ Key Features
 
-- **Automated Release Monitoring**: Add public GitHub and Codeberg repositories and let the app automatically check for new releases in the background.
+- **Automated Release Monitoring**: Add public GitHub, GitLab, and Codeberg repositories and let the app automatically check for new releases in the background.
 - **Flexible Notifications**:
   - **Email**: Configure SMTP settings to receive detailed email notifications.
   - **Apprise**: Integrate with [Apprise](https://github.com/caronc/apprise) to send notifications to over 70 services like Discord, Telegram, Slack, and more.
@@ -91,6 +91,24 @@ Navigate to the `example/` directory. You will need to configure the environment
    # Your GitHub Personal Access Token to increase the API rate limit from 60 to 5000 requests/hour.
    # Create a token with no scopes (public repo access) for better security.
    GITHUB_ACCESS_TOKEN=your_github_pat_here
+   ```
+
+   **GitLab API (Optional)**
+   If you want to monitor private GitLab repositories (including self-hosted instances), configure allowed hosts and host-based tokens:
+   - Access token option: `GITLAB_ACCESS_TOKENS` with scopes `read_api` and `read_repository`.
+   - Deploy token option: `GITLAB_DEPLOY_TOKENS` with scope `read_repository`.
+   - For private repositories, ensure the token has at least project role `Reporter` (or higher).
+   ```env
+   # Optional additional GitLab instances besides gitlab.com (comma-separated).
+   GITLAB_ADDITIONAL_HOSTS=gitlab.example.com,gitlab.internal.example
+
+   # Optional host-based GitLab tokens as comma-separated host=token pairs.
+   # Example: gitlab.com=glpat_xxx,gitlab.example.com=glpat_yyy
+   GITLAB_ACCESS_TOKENS=
+
+   # Optional host-based GitLab deploy tokens as comma-separated host=username:token pairs.
+   # Example: gitlab.example.com=gitlab+deploy-token-123:gl-dpt-xyz
+   GITLAB_DEPLOY_TOKENS=
    ```
 
    **Codeberg API (Optional)**
@@ -331,6 +349,26 @@ To avoid being rate-limited by the GitHub API, it is highly recommended to creat
 GITHUB_ACCESS_TOKEN=your_github_pat_here
 ```
 
+#### **GitLab API (Optional)**
+
+If you want to monitor private GitLab repositories (including self-hosted instances), configure allowed hosts and host-based tokens:
+- Access token option: `GITLAB_ACCESS_TOKENS` with scopes `read_api` and `read_repository`.
+- Deploy token option: `GITLAB_DEPLOY_TOKENS` with scope `read_repository`.
+- For private repositories, ensure the token has at least project role `Reporter` (or higher).
+
+```env
+# Optional additional GitLab instances besides gitlab.com (comma-separated).
+GITLAB_ADDITIONAL_HOSTS=gitlab.example.com,gitlab.internal.example
+
+# Optional host-based GitLab tokens as comma-separated host=token pairs.
+# Example: gitlab.com=glpat_xxx,gitlab.example.com=glpat_yyy
+GITLAB_ACCESS_TOKENS=
+
+# Optional host-based GitLab deploy tokens as comma-separated host=username:token pairs.
+# Example: gitlab.example.com=gitlab+deploy-token-123:gl-dpt-xyz
+GITLAB_DEPLOY_TOKENS=
+```
+
 #### **Codeberg API (Optional)**
 
 Codeberg runs on Gitea/Forgejo and exposes a Gitea-compatible REST API. If you want to monitor private repos, set a token:
@@ -423,6 +461,9 @@ Here is a complete list of all environment variables used by the application.
 | `AUTH_USERNAME`       | The username for logging into the application.                                                            | **Yes**                | -                          |
 | `CODEBERG_ACCESS_TOKEN` | A Codeberg access token (Gitea API) for private repos. Typically needs `read:repository`; `read:user` only for diagnostics. | No                     | -                          |
 | `GITHUB_ACCESS_TOKEN` | A GitHub Personal Access Token to increase the API rate limit. A token with no scopes is sufficient.      | No (but recommended)   | -                          |
+| `GITLAB_ADDITIONAL_HOSTS` | Additional GitLab hosts (without schema/port), comma-separated. `gitlab.com` is always allowed.       | No                     | -                          |
+| `GITLAB_ACCESS_TOKENS` | Host-based GitLab tokens as comma-separated `host=token` pairs for private repos.                         | No                     | -                          |
+| `GITLAB_DEPLOY_TOKENS` | Host-based GitLab deploy tokens as comma-separated `host=username:token` pairs for private repos.         | No                     | -                          |
 | `HTTPS`               | Set to `false` to run in HTTP mode. Defaults to `true` for secure operation.                              | No                     | `true`                     |
 | `LOG_LEVEL`           | Controls server log verbosity: `error`, `warn`, `info`, `debug`, `silent`.                                | No                     | `warn` (prod), `debug` (dev) |
 | `MAIL_FROM_ADDRESS`   | The email address that notifications will be sent from.                                                   | Yes, for email         | -                          |

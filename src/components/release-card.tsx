@@ -126,6 +126,7 @@ export function ReleaseCard({ enrichedRelease, settings }: ReleaseCardProps) {
   const settingsButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const prevIsSettingsOpenRef = React.useRef(false);
   const isTagLink = Boolean(release?.html_url?.includes("/src/tag/"));
+  const isReleaseTimeUnknown = Boolean(release?.published_at_unknown);
 
   React.useEffect(() => {
     // When the settings dialog transitions from open -> closed, return focus to the trigger button.
@@ -142,7 +143,7 @@ export function ReleaseCard({ enrichedRelease, settings }: ReleaseCardProps) {
 
     const updateTimes = () => {
       // Update release time ago
-      if (release?.created_at) {
+      if (release?.created_at && !isReleaseTimeUnknown) {
         const dateToUse = release.published_at || release.created_at;
         setTimeAgo(
           formatDistanceToNowStrict(new Date(dateToUse), {
@@ -150,6 +151,8 @@ export function ReleaseCard({ enrichedRelease, settings }: ReleaseCardProps) {
             locale: locale === "de" ? de : undefined,
           }),
         );
+      } else {
+        setTimeAgo("");
       }
       // Update checked time ago
       if (release?.fetched_at) {
@@ -171,7 +174,7 @@ export function ReleaseCard({ enrichedRelease, settings }: ReleaseCardProps) {
         clearInterval(intervalId);
       }
     };
-  }, [release, locale]);
+  }, [release, locale, isReleaseTimeUnknown]);
   const handleRemove = () => {
     startRemoveTransition(async () => {
       try {
@@ -561,7 +564,9 @@ export function ReleaseCard({ enrichedRelease, settings }: ReleaseCardProps) {
           </div>
           <div className="pt-1 flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
             <span>
-              {timeAgo ? (
+              {isReleaseTimeUnknown ? (
+                t("released_time_unknown")
+              ) : timeAgo ? (
                 t("released_ago", { time: timeAgo })
               ) : (
                 <Skeleton className="h-4 w-24" />

@@ -3,6 +3,7 @@ import {
   checkAppriseStatusAction,
   getCodebergTokenCheck,
   getGitHubRateLimit,
+  getGitlabTokenCheck,
   getUpdateNotificationState,
 } from "@/app/actions";
 import { Header } from "@/components/header";
@@ -60,6 +61,7 @@ export default async function TestPage({
   const t = await getTranslations({ locale: locale, namespace: "TestPage" });
   const rateLimitResult: RateLimitResult = await getGitHubRateLimit();
   const githubTokenSet = !!process.env.GITHUB_ACCESS_TOKEN;
+  const gitlabTokenCheck = await getGitlabTokenCheck();
   const codebergTokenCheck = await getCodebergTokenCheck();
   const notificationConfig = getNotificationConfig();
   const updateNotice: UpdateNotificationState =
@@ -90,6 +92,7 @@ export default async function TestPage({
         <TestPageClient
           rateLimitResult={rateLimitResult}
           isTokenSet={githubTokenSet}
+          gitlabTokenCheck={gitlabTokenCheck}
           codebergTokenCheck={codebergTokenCheck}
           notificationConfig={notificationConfig}
           appriseStatus={appriseStatus}

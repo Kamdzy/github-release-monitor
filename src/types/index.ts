@@ -1,6 +1,7 @@
 export type Repository = {
   // Unique identifier for a monitored repository.
-  // Uses `<provider>:owner/repo` (e.g. `github:owner/repo`, `codeberg:owner/repo`).
+  // Uses `<provider>:owner/repo` for GitHub/Codeberg and
+  // `gitlab:<host>/owner/repo` for GitLab.
   id: string;
   url: string;
   lastSeenReleaseTag?: string;
@@ -26,6 +27,7 @@ export type GithubRelease = {
   body: string | null;
   created_at: string;
   published_at: string | null;
+  published_at_unknown?: boolean;
   prerelease: boolean;
   draft: boolean;
   fetched_at?: string; // Timestamp for when the data was fetched
@@ -38,6 +40,7 @@ export type CachedRelease = {
   body: string | null;
   created_at: string;
   published_at: string | null;
+  published_at_unknown?: boolean;
   fetched_at?: string;
 };
 
@@ -98,6 +101,17 @@ export type CodebergTokenCheckResult =
       status: "valid";
       login: string | null;
       fullName: string | null;
+      diagnosticsLimited?: boolean;
+    }
+  | { status: "invalid_token" }
+  | { status: "api_error" };
+
+export type GitlabTokenCheckResult =
+  | { status: "not_set" }
+  | {
+      status: "valid";
+      username: string | null;
+      name: string | null;
       diagnosticsLimited?: boolean;
     }
   | { status: "invalid_token" }

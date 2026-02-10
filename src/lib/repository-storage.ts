@@ -10,7 +10,7 @@ import type { Repository } from "@/types";
 const dataFilePath = path.join(process.cwd(), "data", "repositories.json");
 const dataDirPath = path.dirname(dataFilePath);
 const isPrefixedRepoId = (repoId: string) =>
-  /^[^/]+:[^/]+\/[^/]+$/i.test(repoId);
+  /^[^/]+:(?:[^/]+\/)+[^/]+$/i.test(repoId);
 
 let migrationInFlight: Promise<void> | null = null;
 

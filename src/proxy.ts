@@ -174,8 +174,42 @@ function getAllowedDevOrigins(): string[] {
     : [];
 }
 
+function normalizeGitlabHost(value: string): string | null {
+  const host = value.trim().toLowerCase();
+  if (!host) return null;
+  if (host.includes("://")) return null;
+  if (host.includes("/")) return null;
+  if (host.includes(":")) return null;
+  if (host.includes("?") || host.includes("#")) return null;
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  if (host.startsWith(".") || host.endsWith(".")) return null;
+  return host;
+}
+
+function getAllowedGitlabHosts(): string[] {
+  const hosts = new Set<string>(["gitlab.com"]);
+  const raw = process.env.GITLAB_ADDITIONAL_HOSTS;
+  if (!raw) return [...hosts];
+
+  for (const entry of raw.split(",")) {
+    const normalized = normalizeGitlabHost(entry);
+    if (!normalized) continue;
+    hosts.add(normalized);
+  }
+
+  return [...hosts];
+}
+
 function getSecurityHeaders() {
   const https = process.env.HTTPS !== "false";
+  const gitlabConnectSrc = getAllowedGitlabHosts().map(
+    (host) => `https://${host}`,
+  );
+  const connectSrc = [
+    "'self'",
+    "https://api.github.com",
+    ...gitlabConnectSrc,
+  ].join(" ");
 
   const cspPolicies = [
     "default-src 'self'",
@@ -183,7 +217,7 @@ function getSecurityHeaders() {
     "style-src 'self' 'unsafe-inline'",
     // Allow images from any HTTPS origin to support arbitrary release note assets.
     "img-src 'self' https:",
-    "connect-src 'self' https://api.github.com",
+    `connect-src ${connectSrc}`,
     "font-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",

@@ -187,4 +187,39 @@ describe('filters: include/exclude/channels/subchannels', () => {
     const enriched = await actions.getLatestReleasesForRepos([repo], baseSettings, 'en', { skipCache: true });
     expect(enriched[0].error?.type).toBe('no_matching_releases');
   });
+
+  it('treats rc suffix without separators as prerelease', async () => {
+    const actions = await import('@/app/actions');
+    const repo: Repository = {
+      id: 'o/r',
+      url: 'https://github.com/o/r',
+      releaseChannels: ['stable'],
+    } as any;
+    // @ts-ignore
+    (global.fetch as any).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ([
+        {
+          id: 1,
+          html_url: '#',
+          tag_name: 'release_candidate_1.0rc2',
+          name: null,
+          body: '',
+          created_at: new Date().toISOString(),
+          published_at: new Date().toISOString(),
+          prerelease: false,
+          draft: false,
+        },
+      ]),
+    });
+    const enriched = await actions.getLatestReleasesForRepos(
+      [repo],
+      baseSettings,
+      'en',
+      { skipCache: true },
+    );
+    expect(enriched[0].error?.type).toBe('no_matching_releases');
+  });
 });

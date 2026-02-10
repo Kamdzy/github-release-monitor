@@ -38,6 +38,7 @@ export default defineConfig({
       AUTH_SECRET: 'x'.repeat(64),
       AUTH_USERNAME: process.env.AUTH_USERNAME || 'test',
       AUTH_PASSWORD: process.env.AUTH_PASSWORD || 'test',
+      GITLAB_ADDITIONAL_HOSTS: process.env.GITLAB_ADDITIONAL_HOSTS || 'gitlab.self.test',
     },
   },
 });

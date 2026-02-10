@@ -72,7 +72,8 @@ const isOwnerRepoShorthand = (value: string) =>
   /^[a-z0-9-._]+\/[a-z0-9-._]+$/i.test(value.trim());
 
 type ProviderChoiceCandidate = {
-  provider: "github" | "codeberg";
+  provider: "github" | "codeberg" | "gitlab";
+  providerHost?: string;
   canonicalRepoUrl: string;
 };
 
@@ -251,6 +252,7 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
         const result = await resolveRepoProvidersAction(raw);
         const candidates = result.candidates.map((c) => ({
           provider: c.provider,
+          providerHost: c.providerHost,
           canonicalRepoUrl: c.canonicalRepoUrl,
         }));
 
@@ -300,11 +302,14 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
 
   const orderedProviderCandidates = React.useMemo(() => {
     const order: Record<ProviderChoiceCandidate["provider"], number> = {
-      codeberg: 0,
-      github: 1,
+      github: 0,
+      gitlab: 1,
+      codeberg: 2,
     };
     return [...providerDialogCandidates].sort(
-      (a, b) => order[a.provider] - order[b.provider],
+      (a, b) =>
+        order[a.provider] - order[b.provider] ||
+        (a.providerHost ?? "").localeCompare(b.providerHost ?? ""),
     );
   }, [providerDialogCandidates]);
 
@@ -536,7 +541,7 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-start">
               {orderedProviderCandidates.map((candidate) => (
                 <AlertDialogAction
-                  key={candidate.provider}
+                  key={`${candidate.provider}-${candidate.canonicalRepoUrl}`}
                   onClick={() =>
                     handleChooseProvider(candidate.canonicalRepoUrl)
                   }
@@ -544,7 +549,13 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
                 >
                   {candidate.provider === "codeberg"
                     ? t("provider_select_codeberg")
-                    : t("provider_select_github")}
+                    : candidate.provider === "gitlab"
+                      ? `${t("provider_select_gitlab")}${
+                          candidate.providerHost
+                            ? ` (${candidate.providerHost})`
+                            : ""
+                        }`
+                      : t("provider_select_github")}
                 </AlertDialogAction>
               ))}
             </div>

@@ -25,7 +25,7 @@ describe('addRepositoriesAction parses and adds valid URLs', () => {
   it('adds only valid supported URLs', async () => {
     const { addRepositoriesAction } = await import('@/app/actions');
     const fd = new FormData();
-    fd.set('urls', 'https://github.com/owner1/repo1\nhttps://gitlab.com/invalid/x\n  https://github.com/Owner2/Repo2  ');
+    fd.set('urls', 'https://github.com/owner1/repo1\nhttps://gitlab.com/invalid\n  https://github.com/Owner2/Repo2  ');
 
     const res = await addRepositoriesAction({}, fd);
     expect(res.success).toBe(true);
