@@ -163,6 +163,7 @@ export function RepoSettingsDialog({
   const { toast } = useToast();
   const displayRepoId = formatRepoIdForDisplay(repoId, {
     showProviderPrefix: globalSettings.showProviderPrefixInRepoId ?? true,
+    showProviderDomain: globalSettings.showProviderDomainInRepoId ?? true,
   });
 
   // Generate unique IDs for form elements

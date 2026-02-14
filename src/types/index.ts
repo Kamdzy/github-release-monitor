@@ -191,6 +191,7 @@ export type AppSettings = {
   showAcknowledge?: boolean;
   showMarkAsNew?: boolean;
   showProviderPrefixInRepoId?: boolean;
+  showProviderDomainInRepoId?: boolean;
   includeRegex?: string;
   excludeRegex?: string;
   appriseMaxCharacters?: number;

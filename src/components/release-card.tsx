@@ -115,6 +115,7 @@ export function ReleaseCard({ enrichedRelease, settings }: ReleaseCardProps) {
   const { isOnline } = useNetworkStatus();
   const displayRepoId = formatRepoIdForDisplay(repoId, {
     showProviderPrefix: settings.showProviderPrefixInRepoId ?? true,
+    showProviderDomain: settings.showProviderDomainInRepoId ?? true,
   });
 
   const [isRemoving, startRemoveTransition] = React.useTransition();

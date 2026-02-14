@@ -26,6 +26,7 @@ const defaultSettings: AppSettings = {
   showAcknowledge: true,
   showMarkAsNew: true,
   showProviderPrefixInRepoId: true,
+  showProviderDomainInRepoId: true,
   includeRegex: undefined,
   excludeRegex: undefined,
   appriseMaxCharacters: 1800,

@@ -155,6 +155,11 @@ export async function updateSettingsAction(newSettings: AppSettings) {
         oldS.showProviderPrefixInRepoId,
         newS.showProviderPrefixInRepoId,
       );
+      pushValueChange(
+        "showProviderDomainInRepoId",
+        oldS.showProviderDomainInRepoId,
+        newS.showProviderDomainInRepoId,
+      );
       pushValueChange("includeRegex", oldS.includeRegex, newS.includeRegex);
       pushValueChange("excludeRegex", oldS.excludeRegex, newS.excludeRegex);
       pushValueChange(

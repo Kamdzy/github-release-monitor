@@ -188,6 +188,8 @@
     "show_mark_as_new_description": "Zeigt eine Schaltfläche an, um einen bereits gelesenen Release manuell wieder als neu zu markieren.",
     "show_provider_prefix_in_repo_id_title": "Provider-Prefix im Repository-Label anzeigen",
     "show_provider_prefix_in_repo_id_description": "Zeigt Repositories als provider:owner/repo statt nur owner/repo an.",
+    "show_provider_domain_in_repo_id_title": "Provider-Domain im Repository-Label anzeigen",
+    "show_provider_domain_in_repo_id_description": "Zeigt GitLab-Repositories mit Domain als provider:domain/owner/repo an.",
     "autosave_waiting": "Wartet auf Speichern...",
     "autosave_saving": "Wird gespeichert...",
     "autosave_success": "Alle Änderungen gespeichert",
