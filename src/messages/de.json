@@ -382,7 +382,8 @@
     "password_label": "Passwort",
     "password_placeholder": "Passwort",
     "login_button": "Anmelden",
-    "error_invalid_credentials": "Ungültige Anmeldedaten. Bitte versuchen Sie es erneut."
+    "error_invalid_credentials": "Ungültige Anmeldedaten. Bitte versuchen Sie es erneut.",
+    "error_too_many_attempts": "Zu viele fehlgeschlagene Anmeldeversuche. Bitte versuchen Sie es später erneut."
   },
   "Actions": {
     "commit_message_fallback_title": "Commit-Nachricht",

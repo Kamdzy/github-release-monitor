@@ -68,13 +68,21 @@ Navigate to the `example/` directory. You will need to configure the environment
 
    **Authentication (Required)**
    ```env
+   # Optional login rate-limit/lockout protection (values in seconds)
+   # Lockout duration once the threshold is reached.
+   AUTH_LOGIN_LOCKOUT_SECONDS=900
+   # Time window to count failed attempts.
+   AUTH_LOGIN_WINDOW_SECONDS=900
+   # Maximum failed login attempts before lockout starts.
+   AUTH_MAX_LOGIN_ATTEMPTS=5
+
+   # The password for logging into the application.
+   AUTH_PASSWORD=your_secure_password
    # A long, random string (at least 32 characters) used to encrypt session cookies.
    # You can generate one using: openssl rand -base64 32
    AUTH_SECRET=your_super_secret_session_password_here
-
-   # The username and password for logging into the application.
+   # The username for logging into the application.
    AUTH_USERNAME=admin
-   AUTH_PASSWORD=your_secure_password
    ```
 
    **Protocol (HTTP/HTTPS)**
@@ -132,6 +140,8 @@ Navigate to the `example/` directory. You will need to configure the environment
    ```env
    # One of: error, warn, info, debug, silent
    # Defaults: development=debug, production=warn (if unset)
+   # Failed logins and active lockouts are logged at WARN.
+   # Successful logins and lockout expiry (access unblocked) are logged at INFO.
    LOG_LEVEL=info
    ```
 
@@ -320,13 +330,21 @@ Now, open the `.env` file and add the following variables.
 These variables are essential for securing your application.
 
 ```env
+# Optional login rate-limit/lockout protection (values in seconds)
+# Lockout duration once the threshold is reached.
+AUTH_LOGIN_LOCKOUT_SECONDS=900
+# Time window to count failed attempts.
+AUTH_LOGIN_WINDOW_SECONDS=900
+# Maximum failed login attempts before lockout starts.
+AUTH_MAX_LOGIN_ATTEMPTS=5
+
+# The password for logging into the application.
+AUTH_PASSWORD=your_secure_password
 # A long, random string (at least 32 characters) used to encrypt session cookies.
 # You can generate one using: openssl rand -base64 32
 AUTH_SECRET=your_super_secret_session_password_here
-
-# The username and password for logging into the application.
+# The username for logging into the application.
 AUTH_USERNAME=admin
-AUTH_PASSWORD=your_secure_password
 ```
 
 #### **Protocol (HTTP/HTTPS)**
@@ -456,6 +474,9 @@ Here is a complete list of all environment variables used by the application.
 |-----------------------|-----------------------------------------------------------------------------------------------------------|------------------------|----------------------------|
 | `ALLOWED_DEV_ORIGINS` | Comma-separated list of allowed origins in development; blocks others in middleware.                      | No (dev only)          | -                          |
 | `APPRISE_URL`         | URL of your Apprise service's notification endpoint (e.g., http://host/notify or http://host/notify/key). | No                     | -                          |
+| `AUTH_LOGIN_LOCKOUT_SECONDS` | Lockout duration (seconds) after too many failed login attempts.                                   | No                     | `900`                      |
+| `AUTH_LOGIN_WINDOW_SECONDS` | Time window (seconds) used to count failed login attempts.                                          | No                     | `900`                      |
+| `AUTH_MAX_LOGIN_ATTEMPTS` | Maximum failed login attempts before a temporary lockout is applied.                                 | No                     | `5`                        |
 | `AUTH_PASSWORD`       | The password for logging into the application.                                                            | **Yes**                | -                          |
 | `AUTH_SECRET`         | A secret key (at least 32 characters) for encrypting user sessions.                                       | **Yes**                | -                          |
 | `AUTH_USERNAME`       | The username for logging into the application.                                                            | **Yes**                | -                          |

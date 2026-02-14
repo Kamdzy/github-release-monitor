@@ -125,9 +125,11 @@ beforeAll(async () => {
 describe('fetchSettingsLocale', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS;
   });
 
-  it('falls back to localhost when public origin fails', async () => {
+  it('tries configured allowed origins before localhost fallback', async () => {
+    process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS = 'https://public.example.com';
     const request = createRequest('https://public.example.com/en/dashboard', {
       host: 'public.example.com',
       'x-forwarded-proto': 'https',
@@ -174,7 +176,11 @@ describe('fetchSettingsLocale', () => {
 });
 
 describe('buildSettingsLocaleApiUrls', () => {
-  it('normalizes zero address host to loopback http origin', () => {
+  beforeEach(() => {
+    delete process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS;
+  });
+
+  it('returns loopback-only origins by default', () => {
     const request = createRequest('https://0.0.0.0:3000/en', {
       host: '0.0.0.0:3000',
       'x-forwarded-proto': 'https',
@@ -184,7 +190,23 @@ describe('buildSettingsLocaleApiUrls', () => {
     const origins = urls.map(url => url.origin);
 
     expect(origins).toContain('http://127.0.0.1:3000');
-    expect(origins).not.toContain('https://0.0.0.0:3000');
+    expect(origins).toContain('http://localhost:3000');
+    expect(origins.some(origin => origin.includes('example.com'))).toBe(false);
+  });
+
+  it('includes explicit non-loopback origins only from env allowlist', () => {
+    process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS = 'https://public.example.com,https://alt.example.com';
+    const request = createRequest('https://public.example.com/en', {
+      host: 'attacker.example.com',
+      'x-forwarded-host': 'attacker.example.com',
+    });
+
+    const urls = buildSettingsLocaleApiUrls(request as any);
+    const origins = urls.map(url => url.origin);
+
+    expect(origins).toContain('https://public.example.com');
+    expect(origins).toContain('https://alt.example.com');
+    expect(origins).not.toContain('https://attacker.example.com');
   });
 });
 

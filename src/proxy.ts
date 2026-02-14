@@ -401,66 +401,42 @@ function buildRedirectUrl(
 function buildSettingsLocaleApiUrls(request: NextRequest): URL[] {
   const origins: string[] = [];
   const seen = new Set<string>();
+  const configuredOrigins = getConfiguredSettingsLocaleApiOrigins();
 
   const addOrigin = (candidate?: string | null) => {
     if (!candidate) return;
     const normalized = normalizeOrigin(candidate);
-    if (!normalized || seen.has(normalized)) {
+    if (
+      !normalized ||
+      seen.has(normalized) ||
+      !isAllowedSettingsLocaleOrigin(normalized, configuredOrigins)
+    ) {
       return;
     }
     seen.add(normalized);
     origins.push(normalized);
   };
 
-  const requestOrigin = request.nextUrl?.origin;
-  addOrigin(requestOrigin);
-
-  const forwardedProto = normalizeProtocolValue(
-    getFirstHeaderValue(request.headers.get("x-forwarded-proto")),
-  );
-  const forwardedHost = getFirstHeaderValue(
-    request.headers.get("x-forwarded-host"),
-  );
-  const forwardedPort = getFirstHeaderValue(
-    request.headers.get("x-forwarded-port"),
-  );
-  const headerHost = getFirstHeaderValue(request.headers.get("host"));
-  const requestProtocol =
-    normalizeProtocolValue(request.nextUrl?.protocol) || "http";
-  const requestPort = request.nextUrl?.port;
-
-  const hostEntries = [
-    { host: forwardedHost, proto: forwardedProto, port: forwardedPort },
-    {
-      host: headerHost,
-      proto: forwardedProto || requestProtocol,
-      port: requestPort || forwardedPort,
-    },
-  ];
-
-  for (const entry of hostEntries) {
-    if (!entry.host) continue;
-    const proto =
-      normalizeProtocolValue(entry.proto) || inferProtocol(entry.host);
-    const port = entry.host.includes(":") ? undefined : entry.port;
-    const hostWithPort = port ? `${entry.host}:${port}` : entry.host;
-    const origin = `${proto}://${hostWithPort}`;
+  // Optional explicit allowlist for non-loopback origins.
+  // Useful when localhost cannot reach this Next.js instance in specific deployments.
+  configuredOrigins.forEach((origin) => {
     addOrigin(origin);
-    if (!entry.host.includes(":") && !port && requestPort) {
-      addOrigin(`${proto}://${entry.host}:${requestPort}`);
-    }
+  });
+
+  const requestOrigin = request.nextUrl?.origin;
+  if (requestOrigin && isLoopbackOrigin(requestOrigin)) {
+    addOrigin(requestOrigin);
   }
 
   const fallbackPorts = uniqueDefined([
-    forwardedPort,
-    requestPort,
-    process.env.PORT,
+    normalizePort(process.env.PORT),
     "3000",
   ]);
 
   for (const port of fallbackPorts) {
     addOrigin(`http://127.0.0.1:${port}`);
     addOrigin(`http://localhost:${port}`);
+    addOrigin(`http://[::1]:${port}`);
   }
 
   if (origins.length === 0) {
@@ -481,18 +457,56 @@ function uniqueDefined(values: Array<string | undefined | null>): string[] {
   return result;
 }
 
-function getFirstHeaderValue(value: string | null): string | undefined {
+function normalizePort(value?: string | null): string | undefined {
   if (!value) return undefined;
-  const first = value.split(",")[0]?.trim();
-  return first || undefined;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const numericPort = Number(trimmed);
+  if (
+    !Number.isInteger(numericPort) ||
+    numericPort < 1 ||
+    numericPort > 65535
+  ) {
+    return undefined;
+  }
+  return String(numericPort);
 }
 
-function inferProtocol(host: string): string {
-  if (!host) return "http";
-  if (host.includes("localhost") || host.includes("127.")) {
-    return "http";
+function getConfiguredSettingsLocaleApiOrigins(): string[] {
+  const raw = process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS;
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((entry) => normalizeOrigin(entry))
+    .filter((entry): entry is string => Boolean(entry));
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1"
+  );
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin);
+    return isLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
   }
-  return process.env.HTTPS === "false" ? "http" : "https";
+}
+
+function isAllowedSettingsLocaleOrigin(
+  origin: string,
+  configuredOrigins: string[],
+): boolean {
+  if (isLoopbackOrigin(origin)) {
+    return true;
+  }
+  return configuredOrigins.includes(origin);
 }
 
 function normalizeProtocolValue(
@@ -519,6 +533,9 @@ function normalizeOrigin(candidate: string): string | null {
       if (!url.protocol || !url.hostname) {
         return null;
       }
+      if (url.username || url.password) {
+        return null;
+      }
 
       const isZeroAddress = url.hostname === "0.0.0.0" || url.hostname === "::";
       const hostname = isZeroAddress
@@ -530,6 +547,9 @@ function normalizeOrigin(candidate: string): string | null {
       const protocol = isZeroAddress
         ? "http"
         : (normalizeProtocolValue(url.protocol) ?? "http");
+      if (protocol !== "http" && protocol !== "https") {
+        return null;
+      }
 
       const needsBrackets = hostname.includes(":");
       const hostWithPort = url.port

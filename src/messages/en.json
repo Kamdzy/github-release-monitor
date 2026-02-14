@@ -382,7 +382,8 @@
     "password_label": "Password",
     "password_placeholder": "Password",
     "login_button": "Login",
-    "error_invalid_credentials": "Invalid credentials. Please try again."
+    "error_invalid_credentials": "Invalid credentials. Please try again.",
+    "error_too_many_attempts": "Too many failed login attempts. Please try again later."
   },
   "Actions": {
     "commit_message_fallback_title": "Commit Message",
