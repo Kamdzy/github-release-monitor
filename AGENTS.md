@@ -11,6 +11,18 @@ Prefer Docker for lint/typecheck/tests. Avoid running `node`/`npm` directly on t
 - `docker build -f ./docker/Dockerfile --target e2e -t grm-e2e --progress=plain .`
 - `docker build -f ./docker/Dockerfile --target runner -t github-release-monitor:dev --progress=plain .`
 
+## Dependencies / Lockfile (Docker)
+
+### Regenerate Lockfile
+
+Use this to regenerate `package-lock.json` in a clean Node 24 Alpine container without host `npm`.
+- `rm -f package-lock.json && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/app -w /app node:24-alpine npm i --package-lock-only --no-audit --no-fund`
+
+### Check Outdated Packages
+
+Use this to check for outdated packages in a temporary container setup.
+- `docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/app -w /app node:24-alpine sh -c "npm ci --ignore-scripts --no-audit --no-fund && npm outdated && rm -rf node_modules"`
+
 ## Project Structure for Codex Navigation
 
 - `/src`: Next.js application source
