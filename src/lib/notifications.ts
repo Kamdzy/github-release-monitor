@@ -7,12 +7,14 @@ import type {
   AppSettings,
   GithubRelease,
   Repository,
+  TagDigest,
 } from "@/types";
 import {
   generateHtmlReleaseBody,
   generatePlainTextReleaseBody,
   getFormattedDate,
   sendNewReleaseEmail,
+  sendPackageUpdateEmail,
 } from "./email";
 
 async function generateMarkdownReleaseBody(
@@ -275,4 +277,114 @@ export async function sendTestAppriseNotification(
   const testSettings = { ...settings, appriseFormat: "text" as AppriseFormat };
   const testRepo = { ...repository, appriseFormat: "text" as AppriseFormat };
   await sendAppriseNotification(testRepo, release, locale, testSettings);
+}
+
+// Generates the plain text body for a package digest change notification.
+function generatePackageNotificationText(
+  repo: Repository,
+  changedTags: TagDigest[],
+): string {
+  const lines: string[] = [
+    `GHCR Package Update: ${repo.packageOwner}/${repo.packageName}`,
+    "",
+  ];
+  for (const tag of changedTags) {
+    const shortDigest = tag.digest.startsWith("sha256:")
+      ? tag.digest.slice(0, 19)
+      : tag.digest.slice(0, 12);
+    lines.push(`Tag "${tag.tag}" → ${shortDigest}`);
+    lines.push(`  Updated: ${tag.lastUpdated}`);
+  }
+  lines.push("");
+  lines.push(`View: ${repo.url}`);
+  return lines.join("\n");
+}
+
+// Generates the markdown body for a package digest change notification.
+function generatePackageNotificationMarkdown(
+  repo: Repository,
+  changedTags: TagDigest[],
+): string {
+  const lines: string[] = [
+    `## GHCR Package Update: ${repo.packageOwner}/${repo.packageName}`,
+    "",
+  ];
+  for (const tag of changedTags) {
+    const shortDigest = tag.digest.startsWith("sha256:")
+      ? tag.digest.slice(0, 19)
+      : tag.digest.slice(0, 12);
+    lines.push(
+      `- **${tag.tag}**: \`${shortDigest}\` (updated ${tag.lastUpdated})`,
+    );
+  }
+  lines.push("");
+  lines.push(`[View on GitHub](${repo.url})`);
+  return lines.join("\n");
+}
+
+// Sends notifications for GHCR package digest changes via all configured channels.
+export async function sendPackageNotification(
+  repo: Repository,
+  changedTags: TagDigest[],
+  locale: string,
+  settings: AppSettings,
+): Promise<void> {
+  const log = logger.withScope("PackageNotifications");
+  const { MAIL_HOST, APPRISE_URL } = process.env;
+
+  const promises: Promise<void>[] = [];
+
+  if (MAIL_HOST) {
+    promises.push(
+      sendPackageUpdateEmail(repo, changedTags, locale, settings.timeFormat),
+    );
+  }
+
+  if (APPRISE_URL) {
+    const format: AppriseFormat =
+      repo.appriseFormat ?? settings.appriseFormat ?? "text";
+
+    let body: string;
+    if (format === "markdown") {
+      body = generatePackageNotificationMarkdown(repo, changedTags);
+    } else {
+      body = generatePackageNotificationText(repo, changedTags);
+    }
+
+    const title = `GHCR Update: ${repo.packageOwner}/${repo.packageName}`;
+    const tags = repo.appriseTags ?? settings.appriseTags;
+
+    const payload: Record<string, string> = {
+      title,
+      body,
+      type: "info",
+    };
+    if (tags) payload.tag = tags;
+
+    promises.push(
+      fetch(APPRISE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then((r) => {
+        if (!r.ok) {
+          throw new Error(`Apprise returned ${r.status}`);
+        }
+      }),
+    );
+  }
+
+  if (promises.length === 0) {
+    log.warn("No notification services configured for package update.");
+    return;
+  }
+
+  const results = await Promise.allSettled(promises);
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length > 0) {
+    const reasons = failures
+      .map((f) => (f as PromiseRejectedResult).reason)
+      .join("; ");
+    throw new Error(`Package notification(s) failed: ${reasons}`);
+  }
 }

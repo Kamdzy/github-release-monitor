@@ -1,11 +1,28 @@
+export type MonitoredItemType = "release" | "package";
+
+export type TagDigest = {
+  tag: string;
+  digest: string; // "sha256:abc..."
+  lastUpdated: string; // ISO timestamp
+};
+
+export type CachedTagChange = {
+  tag: string;
+  newDigest: string;
+  previousDigest?: string;
+  detectedAt: string; // ISO timestamp when we detected the change
+  packageUrl: string; // link to GHCR page
+};
+
 export type Repository = {
-  id: string; // Should be in the format "owner/repo"
+  id: string; // "owner/repo" for releases, "ghcr:owner/package" for packages
   url: string;
+  type?: MonitoredItemType; // undefined or "release" for backward compat, "package" for GHCR
   lastSeenReleaseTag?: string;
   isNew?: boolean;
   etag?: string;
   latestRelease?: CachedRelease;
-  // New: Per-repository settings override
+  // Per-repository settings override
   // Empty arrays/undefined mean "use global setting"
   releaseChannels?: ReleaseChannel[];
   preReleaseSubChannels?: PreReleaseChannelType[];
@@ -14,6 +31,13 @@ export type Repository = {
   excludeRegex?: string;
   appriseTags?: string;
   appriseFormat?: AppriseFormat;
+  // Package-specific fields (only used when type === "package")
+  packageOwner?: string; // e.g., "hotio"
+  packageName?: string; // e.g., "qbittorrent"
+  packageOwnerType?: "users" | "orgs"; // API path segment
+  monitoredTags?: string[]; // ["latest", "release", "stable"]
+  tagDigests?: TagDigest[]; // last known digest per monitored tag
+  latestTagChange?: CachedTagChange; // most recent change for display
 };
 
 export type GithubRelease = {
@@ -47,7 +71,8 @@ export type FetchError = {
     | "no_matching_releases"
     | "invalid_url"
     | "api_error"
-    | "not_modified";
+    | "not_modified"
+    | "package_not_found";
 };
 
 export type EnrichedRelease = {
@@ -65,6 +90,16 @@ export type EnrichedRelease = {
     excludeRegex?: string;
     appriseTags?: string;
     appriseFormat?: AppriseFormat;
+  };
+  // Package-specific enriched data
+  tagChanges?: TagDigest[]; // which tags had digest changes
+  packageInfo?: {
+    owner: string;
+    name: string;
+    ownerType: "users" | "orgs";
+    monitoredTags: string[];
+    tagDigests: TagDigest[];
+    latestTagChange?: CachedTagChange;
   };
 };
 

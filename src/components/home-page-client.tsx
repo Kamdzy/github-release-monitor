@@ -6,6 +6,7 @@ import * as React from "react";
 import { EmptyState } from "@/components/empty-state";
 import { ExportButton } from "@/components/export-button";
 import { RefreshButton } from "@/components/refresh-button";
+import { PackageCard } from "@/components/package-card";
 import { ReleaseCard } from "@/components/release-card";
 import { RepositoryForm } from "@/components/repository-form";
 import type {
@@ -37,6 +38,7 @@ function getErrorTranslationKey(
     invalid_url: "error_invalid_url",
     api_error: "error_generic_fetch",
     rate_limit: "error_rate_limit",
+    package_not_found: "error_package_not_found",
   };
   return keyMap[errorType];
 }
@@ -69,8 +71,19 @@ export function HomePageClient({
   const sortedReleases = React.useMemo(
     () =>
       [...releases].sort((a, b) => {
-        const dateA = a.release?.published_at || a.release?.created_at;
-        const dateB = b.release?.published_at || b.release?.created_at;
+        // For packages, use the most recent tag digest update time
+        const getDate = (item: typeof a) => {
+          if (item.packageInfo) {
+            const latest = item.packageInfo.tagDigests
+              ?.map((d) => d.lastUpdated)
+              .sort()
+              .pop();
+            return latest || item.packageInfo.latestTagChange?.detectedAt;
+          }
+          return item.release?.published_at || item.release?.created_at;
+        };
+        const dateA = getDate(a);
+        const dateB = getDate(b);
 
         if (!dateA) return 1;
         if (!dateB) return -1;
@@ -137,13 +150,21 @@ export function HomePageClient({
           <EmptyState />
         ) : (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {sortedReleases.map((enrichedRelease) => (
-              <ReleaseCard
-                key={enrichedRelease.repoId}
-                enrichedRelease={enrichedRelease}
-                settings={settings}
-              />
-            ))}
+            {sortedReleases.map((enrichedRelease) =>
+              enrichedRelease.packageInfo ? (
+                <PackageCard
+                  key={enrichedRelease.repoId}
+                  enrichedRelease={enrichedRelease}
+                  settings={settings}
+                />
+              ) : (
+                <ReleaseCard
+                  key={enrichedRelease.repoId}
+                  enrichedRelease={enrichedRelease}
+                  settings={settings}
+                />
+              ),
+            )}
           </div>
         )}
       </section>

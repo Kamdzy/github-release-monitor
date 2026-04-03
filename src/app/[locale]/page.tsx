@@ -40,6 +40,23 @@ export default async function HomePage({
     repositories = await getRepositories();
     if (repositories.length > 0) {
       releases = repositories.map((repo) => {
+        // Handle package-type items differently
+        if (repo.type === "package") {
+          return {
+            repoId: repo.id,
+            repoUrl: repo.url,
+            isNew: repo.isNew,
+            packageInfo: {
+              owner: repo.packageOwner ?? "",
+              name: repo.packageName ?? "",
+              ownerType: repo.packageOwnerType ?? "users",
+              monitoredTags: repo.monitoredTags ?? [],
+              tagDigests: repo.tagDigests ?? [],
+              latestTagChange: repo.latestTagChange,
+            },
+          };
+        }
+
         const cached = repo.latestRelease;
         const reconstructedRelease: GithubRelease | undefined = cached
           ? {

@@ -74,6 +74,8 @@ function getErrorMessage(
       return t("error_invalid_url");
     case "no_releases_found":
       return t("error_no_releases_found");
+    case "package_not_found":
+      return t("error_package_not_found");
     default:
       return t("error_generic_fetch");
   }

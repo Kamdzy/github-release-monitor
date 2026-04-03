@@ -6,7 +6,7 @@ import { remark } from "remark";
 import remarkGfm from "remark-gfm";
 import remarkHtml from "remark-html";
 import { logger } from "@/lib/logger";
-import type { GithubRelease, Repository, TimeFormat } from "@/types";
+import type { GithubRelease, Repository, TagDigest, TimeFormat } from "@/types";
 
 export async function getFormattedDate(
   date: Date,
@@ -370,4 +370,110 @@ export async function sendTestEmail(
     timeFormat,
     recipient,
   );
+}
+
+// Sends an email notification for GHCR package digest changes.
+export async function sendPackageUpdateEmail(
+  repository: Repository,
+  changedTags: TagDigest[],
+  locale: string,
+  timeFormat: TimeFormat,
+  toAddress?: string,
+): Promise<void> {
+  const {
+    MAIL_HOST,
+    MAIL_PORT,
+    MAIL_USERNAME,
+    MAIL_PASSWORD,
+    MAIL_FROM_ADDRESS,
+    MAIL_FROM_NAME,
+    MAIL_TO_ADDRESS,
+  } = process.env;
+
+  const log = logger.withScope("Email");
+  const recipient = toAddress || MAIL_TO_ADDRESS;
+
+  if (!MAIL_HOST || !MAIL_PORT || !MAIL_FROM_ADDRESS || !recipient) {
+    throw new Error("Missing email configuration for package notification.");
+  }
+
+  const port = Number(MAIL_PORT);
+  const transporter = nodemailer.createTransport({
+    host: MAIL_HOST,
+    port,
+    secure: port === 465,
+    auth: {
+      user: MAIL_USERNAME,
+      pass: MAIL_PASSWORD,
+    },
+  });
+
+  const packageLabel = `${repository.packageOwner}/${repository.packageName}`;
+  const subject = `GHCR Update: ${packageLabel}`;
+
+  const tagLines = changedTags.map((tag) => {
+    const shortDigest = tag.digest.startsWith("sha256:")
+      ? tag.digest.slice(0, 19)
+      : tag.digest.slice(0, 12);
+    return `  ${tag.tag}: ${shortDigest} (updated ${getFormattedDate(new Date(tag.lastUpdated), locale, timeFormat)})`;
+  });
+
+  const textBody = [
+    `GHCR Package Update: ${packageLabel}`,
+    "",
+    "Changed tags:",
+    ...tagLines,
+    "",
+    `View: ${repository.url}`,
+  ].join("\n");
+
+  const tagRows = changedTags
+    .map((tag) => {
+      const shortDigest = tag.digest.startsWith("sha256:")
+        ? tag.digest.slice(0, 19)
+        : tag.digest.slice(0, 12);
+      const date = getFormattedDate(
+        new Date(tag.lastUpdated),
+        locale,
+        timeFormat,
+      );
+      return `<tr><td style="padding:6px 12px;border-bottom:1px solid #333">${tag.tag}</td><td style="padding:6px 12px;border-bottom:1px solid #333"><code>${shortDigest}</code></td><td style="padding:6px 12px;border-bottom:1px solid #333">${date}</td></tr>`;
+    })
+    .join("");
+
+  const htmlBody = `
+    <div style="background-color:#1a1a2e;color:#e0e0e0;font-family:Arial,sans-serif;padding:20px;max-width:600px;margin:auto;border-radius:8px">
+      <h2 style="color:#64b5f6;margin-bottom:16px">GHCR Package Update</h2>
+      <p style="font-size:18px;font-weight:bold;color:#fff">${packageLabel}</p>
+      <table style="width:100%;border-collapse:collapse;margin:16px 0">
+        <thead>
+          <tr style="border-bottom:2px solid #444">
+            <th style="padding:6px 12px;text-align:left;color:#90caf9">Tag</th>
+            <th style="padding:6px 12px;text-align:left;color:#90caf9">Digest</th>
+            <th style="padding:6px 12px;text-align:left;color:#90caf9">Updated</th>
+          </tr>
+        </thead>
+        <tbody>${tagRows}</tbody>
+      </table>
+      <a href="${repository.url}" style="color:#64b5f6;text-decoration:none">View on GitHub &rarr;</a>
+    </div>`;
+
+  try {
+    await transporter.sendMail({
+      from: `"${MAIL_FROM_NAME || "GitHub Release Monitor"}" <${MAIL_FROM_ADDRESS}>`,
+      to: recipient,
+      subject,
+      text: textBody,
+      html: htmlBody,
+    });
+    log.info(`Package update email sent to ${recipient} for ${packageLabel}`);
+  } catch (error: unknown) {
+    log.error(
+      `Failed to send package update email for ${packageLabel}:`,
+      error,
+    );
+    const message =
+      error instanceof Error ? error.message : String(error ?? "unknown");
+    throw new Error(`Email send failed: ${message}`);
+  }
 }

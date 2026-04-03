@@ -9,6 +9,7 @@ import { getJobStatus, type JobStatus, setJobStatus } from "@/lib/job-store";
 import { logger } from "@/lib/logger";
 import {
   sendNotification,
+  sendPackageNotification,
   sendTestAppriseNotification,
 } from "@/lib/notifications";
 import { getRepositories, saveRepositories } from "@/lib/repository-storage";
@@ -17,15 +18,18 @@ import { getSystemStatus, updateSystemStatus } from "@/lib/system-status";
 import { scheduleTask } from "@/lib/task-scheduler";
 import { runApplicationUpdateCheck } from "@/lib/update-check";
 import type {
+  AppriseFormat,
   AppriseStatus,
   AppSettings,
   CachedRelease,
+  CachedTagChange,
   EnrichedRelease,
   FetchError,
   GithubRelease,
   PreReleaseChannelType,
   RateLimitResult,
   Repository,
+  TagDigest,
   UpdateNotificationState,
 } from "@/types";
 import { allPreReleaseTypes } from "@/types";
@@ -153,6 +157,102 @@ function isValidRepoId(repoId: string): boolean {
   // Enforces the "owner/repo" structure.
   const repoIdRegex = /^[a-z0-9-._]+\/[a-z0-9-._]+$/i;
   return repoIdRegex.test(repoId);
+}
+
+// Parses GHCR package URLs into their components.
+// Supports:
+//   https://github.com/hotio/qbittorrent/pkgs/container/qbittorrent
+//   https://github.com/orgs/my-org/packages/container/package/my-image
+//   ghcr.io/hotio/qbittorrent (shorthand)
+function parseGhcrPackageUrl(url: string): {
+  owner: string;
+  packageName: string;
+  ownerType: "users" | "orgs";
+  id: string;
+} | null {
+  try {
+    const trimmed = url.trim();
+    if (!trimmed) return null;
+
+    // Handle ghcr.io shorthand: ghcr.io/owner/package
+    if (
+      trimmed.startsWith("ghcr.io/") ||
+      trimmed.startsWith("https://ghcr.io/")
+    ) {
+      const urlStr = trimmed.startsWith("https://")
+        ? trimmed
+        : `https://${trimmed}`;
+      const urlObj = new URL(urlStr);
+      const parts = urlObj.pathname.split("/").filter(Boolean);
+      if (parts.length >= 2) {
+        const owner = parts[0].toLowerCase();
+        const packageName = parts[1].toLowerCase();
+        return {
+          owner,
+          packageName,
+          ownerType: "users",
+          id: `ghcr:${owner}/${packageName}`,
+        };
+      }
+      return null;
+    }
+
+    const urlObj = new URL(trimmed);
+    if (urlObj.hostname !== "github.com") return null;
+    const parts = urlObj.pathname.split("/").filter(Boolean);
+
+    // Format: /orgs/{org}/packages/container/package/{name}
+    if (
+      parts.length >= 5 &&
+      parts[0] === "orgs" &&
+      parts[2] === "packages" &&
+      parts[3] === "container"
+    ) {
+      const owner = parts[1].toLowerCase();
+      // "package" prefix in some URL formats
+      const packageName = (
+        parts[4] === "package" && parts[5] ? parts[5] : parts[4]
+      ).toLowerCase();
+      return {
+        owner,
+        packageName,
+        ownerType: "orgs",
+        id: `ghcr:${owner}/${packageName}`,
+      };
+    }
+
+    // Format: /{owner}/{repo}/pkgs/container/{name}
+    if (
+      parts.length >= 4 &&
+      parts[2] === "pkgs" &&
+      parts[3] === "container" &&
+      parts[4]
+    ) {
+      const owner = parts[0].toLowerCase();
+      const packageName = parts[4].toLowerCase();
+      return {
+        owner,
+        packageName,
+        ownerType: "users",
+        id: `ghcr:${owner}/${packageName}`,
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Validates a package ID in the format "ghcr:owner/name".
+function isValidPackageId(id: string): boolean {
+  if (typeof id !== "string") return false;
+  return /^ghcr:[a-z0-9-._]+\/[a-z0-9-._]+$/i.test(id);
+}
+
+// Validates either a release repo ID or a package ID.
+function isValidItemId(id: string): boolean {
+  return isValidRepoId(id) || isValidPackageId(id);
 }
 
 function isPreReleaseByTagName(
@@ -897,6 +997,190 @@ export async function getLatestReleasesForRepos(
   return results;
 }
 
+// ─── GHCR Package Version Fetching ────────────────────────────────────────────
+
+// GitHub Packages API response shape for a container version.
+type GhcrPackageVersion = {
+  id: number;
+  name: string; // sha256 digest
+  created_at: string;
+  updated_at: string;
+  html_url?: string;
+  metadata?: {
+    package_type?: string;
+    container?: {
+      tags?: string[];
+    };
+  };
+};
+
+// Fetches the current digest for each monitored tag from the GitHub Packages API.
+async function fetchPackageVersions(
+  owner: string,
+  packageName: string,
+  ownerType: "users" | "orgs",
+  monitoredTags: string[],
+): Promise<{
+  tagDigests: TagDigest[];
+  error: FetchError | null;
+}> {
+  if (monitoredTags.length === 0) {
+    return { tagDigests: [], error: null };
+  }
+
+  const headers: HeadersInit = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "GitHubReleaseMonitorApp",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (process.env.GITHUB_ACCESS_TOKEN) {
+    headers.Authorization = `token ${process.env.GITHUB_ACCESS_TOKEN}`;
+  }
+
+  const tagSet = new Set(monitoredTags);
+  const foundDigests = new Map<string, TagDigest>();
+  const PER_PAGE = 100;
+  const MAX_PAGES = 10; // safety limit
+
+  try {
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const apiUrl = `https://api.github.com/${ownerType}/${owner}/packages/container/${packageName}/versions?per_page=${PER_PAGE}&page=${page}&state=active`;
+      const { response, data } = await fetchJsonResponseWithRetry<
+        GhcrPackageVersion[]
+      >(
+        apiUrl,
+        { headers, cache: "no-store" },
+        {
+          description: `GHCR versions for ${owner}/${packageName} (page ${page})`,
+        },
+      );
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          return { tagDigests: [], error: { type: "package_not_found" } };
+        }
+        if (response.status === 403 || response.status === 429) {
+          return { tagDigests: [], error: { type: "rate_limit" } };
+        }
+        return { tagDigests: [], error: { type: "api_error" } };
+      }
+
+      if (!data || !Array.isArray(data)) {
+        return { tagDigests: [], error: { type: "api_error" } };
+      }
+
+      for (const version of data) {
+        const versionTags = version.metadata?.container?.tags ?? [];
+        for (const vTag of versionTags) {
+          if (tagSet.has(vTag) && !foundDigests.has(vTag)) {
+            foundDigests.set(vTag, {
+              tag: vTag,
+              digest: version.name,
+              lastUpdated: version.updated_at,
+            });
+          }
+        }
+      }
+
+      // Stop early if all monitored tags are found or if we got fewer results than a full page
+      if (foundDigests.size >= tagSet.size || data.length < PER_PAGE) {
+        break;
+      }
+    }
+
+    return { tagDigests: Array.from(foundDigests.values()), error: null };
+  } catch (error) {
+    log.error(
+      `Error fetching GHCR versions for ${owner}/${packageName}:`,
+      error,
+    );
+    return { tagDigests: [], error: { type: "api_error" } };
+  }
+}
+
+// Batch-fetches digests for multiple packages, returning EnrichedRelease[] for the grid.
+export async function getLatestDigestsForPackages(
+  packages: Repository[],
+  settings: AppSettings,
+): Promise<EnrichedRelease[]> {
+  if (packages.length === 0) {
+    return [];
+  }
+
+  const configuredParallel = resolveParallelRepoFetches(settings);
+  const effectiveBatchSize = Math.min(configuredParallel, packages.length);
+
+  log.info(
+    `Fetching digests for ${packages.length} packages with batch size ${effectiveBatchSize}.`,
+  );
+
+  const buildEnrichedPackage = async (
+    pkg: Repository,
+  ): Promise<EnrichedRelease> => {
+    if (!pkg.packageOwner || !pkg.packageName || !pkg.monitoredTags?.length) {
+      return {
+        repoId: pkg.id,
+        repoUrl: pkg.url,
+        error: { type: "invalid_url" },
+        isNew: pkg.isNew,
+      };
+    }
+
+    const { tagDigests, error } = await fetchPackageVersions(
+      pkg.packageOwner,
+      pkg.packageName,
+      pkg.packageOwnerType ?? "users",
+      pkg.monitoredTags,
+    );
+
+    if (error) {
+      return {
+        repoId: pkg.id,
+        repoUrl: pkg.url,
+        error,
+        isNew: pkg.isNew,
+        packageInfo: {
+          owner: pkg.packageOwner,
+          name: pkg.packageName,
+          ownerType: pkg.packageOwnerType ?? "users",
+          monitoredTags: pkg.monitoredTags,
+          tagDigests: pkg.tagDigests ?? [],
+          latestTagChange: pkg.latestTagChange,
+        },
+      };
+    }
+
+    return {
+      repoId: pkg.id,
+      repoUrl: pkg.url,
+      isNew: pkg.isNew,
+      tagChanges: tagDigests,
+      packageInfo: {
+        owner: pkg.packageOwner,
+        name: pkg.packageName,
+        ownerType: pkg.packageOwnerType ?? "users",
+        monitoredTags: pkg.monitoredTags,
+        tagDigests,
+        latestTagChange: pkg.latestTagChange,
+      },
+    };
+  };
+
+  const results: EnrichedRelease[] = new Array(packages.length);
+
+  for (let start = 0; start < packages.length; start += effectiveBatchSize) {
+    const batch = packages.slice(start, start + effectiveBatchSize);
+    await Promise.all(
+      batch.map(async (pkg, offset) => {
+        const result = await buildEnrichedPackage(pkg);
+        results[start + offset] = result;
+      }),
+    );
+  }
+
+  return results;
+}
+
 export async function addRepositoriesAction(
   _prevState: unknown,
   formData: FormData,
@@ -1073,9 +1357,167 @@ export async function importRepositoriesAction(
   });
 }
 
+// Adds GHCR container packages for monitoring.
+export async function addPackagesAction(
+  _prevState: unknown,
+  formData: FormData,
+): Promise<{
+  success: boolean;
+  toast?: { title: string; description: string };
+  error?: string;
+  jobId?: string;
+}> {
+  const t = await getTranslations("PackageForm");
+  const urlsRaw = (formData.get("urls") as string | null) ?? "";
+  const tagsRaw = (formData.get("tags") as string | null) ?? "";
+
+  const monitoredTags = tagsRaw
+    .split(",")
+    .map((tag) => tag.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (monitoredTags.length === 0) {
+    return { success: false, error: t("toast_no_tags") };
+  }
+
+  return scheduleTask("addPackagesAction", async () => {
+    const lines = urlsRaw
+      .split(/[\n,]+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      return { success: false, error: t("toast_no_urls") };
+    }
+
+    const existingRepos = await getRepositories();
+    const existingIds = new Set(existingRepos.map((r) => r.id));
+    const newPackages: Repository[] = [];
+    let skippedCount = 0;
+    let failedCount = 0;
+
+    for (const line of lines) {
+      const parsed = parseGhcrPackageUrl(line);
+      if (!parsed) {
+        failedCount++;
+        continue;
+      }
+      if (existingIds.has(parsed.id)) {
+        skippedCount++;
+        continue;
+      }
+      existingIds.add(parsed.id);
+      newPackages.push({
+        id: parsed.id,
+        url: `https://github.com/${parsed.owner}/${parsed.packageName}/pkgs/container/${parsed.packageName}`,
+        type: "package",
+        packageOwner: parsed.owner,
+        packageName: parsed.packageName,
+        packageOwnerType: parsed.ownerType,
+        monitoredTags,
+      });
+    }
+
+    if (newPackages.length === 0) {
+      if (failedCount > 0) {
+        return {
+          success: false,
+          error: t("toast_fail_description", { failed: failedCount }),
+        };
+      }
+      return {
+        success: true,
+        toast: {
+          title: t("toast_success_title"),
+          description: t("toast_all_skipped"),
+        },
+      };
+    }
+
+    const allRepos = [...existingRepos, ...newPackages];
+    await saveRepositories(allRepos);
+
+    const jobId = crypto.randomUUID();
+    setJobStatus(jobId, "pending");
+
+    const newIds = newPackages.map((p) => p.id);
+    // Fire and forget the background refresh
+    scheduleTask(`refreshPackages: ${jobId}`, async () => {
+      try {
+        await refreshMultipleRepositoriesAction(newIds, jobId);
+      } catch (error) {
+        log.error("Failed to refresh newly added packages:", error);
+        setJobStatus(jobId, "error");
+      }
+    });
+
+    revalidatePath("/");
+    return {
+      success: true,
+      toast: {
+        title: t("toast_success_title"),
+        description: t("toast_success_description", {
+          added: newPackages.length,
+          skipped: skippedCount,
+          failed: failedCount,
+        }),
+      },
+      jobId,
+    };
+  });
+}
+
+// Updates settings for a monitored GHCR package.
+export async function updatePackageSettingsAction(
+  repoId: string,
+  settings: {
+    monitoredTags?: string[];
+    appriseTags?: string;
+    appriseFormat?: AppriseFormat;
+  },
+): Promise<{ success: boolean; error?: string }> {
+  return scheduleTask(`updatePackageSettingsAction: ${repoId}`, async () => {
+    if (!isValidItemId(repoId)) {
+      return { success: false, error: "Invalid package ID." };
+    }
+
+    const allRepos = await getRepositories();
+    const repoIndex = allRepos.findIndex((r) => r.id === repoId);
+    if (repoIndex === -1) {
+      return { success: false, error: "Package not found." };
+    }
+
+    const repo = allRepos[repoIndex];
+    if (repo.type !== "package") {
+      return { success: false, error: "Item is not a package." };
+    }
+
+    if (settings.monitoredTags !== undefined) {
+      const tags = settings.monitoredTags
+        .map((t) => t.trim().toLowerCase())
+        .filter(Boolean);
+      if (tags.length === 0) {
+        return { success: false, error: "At least one tag must be monitored." };
+      }
+      repo.monitoredTags = tags;
+    }
+    if (settings.appriseTags !== undefined) {
+      repo.appriseTags = settings.appriseTags || undefined;
+    }
+    if (settings.appriseFormat !== undefined) {
+      repo.appriseFormat = settings.appriseFormat || undefined;
+    }
+
+    allRepos[repoIndex] = repo;
+    await saveRepositories(allRepos);
+    revalidatePath("/");
+    return { success: true };
+  });
+}
+
 export async function refreshSingleRepositoryAction(repoId: string) {
   return scheduleTask(`refreshSingleRepositoryAction: ${repoId}`, async () => {
-    if (!isValidRepoId(repoId)) {
+    if (!isValidItemId(repoId)) {
       log.error("Invalid repoId format for refresh:", repoId);
       return;
     }
@@ -1089,6 +1531,27 @@ export async function refreshSingleRepositoryAction(repoId: string) {
 
     if (!repoToRefresh) {
       log.error(`Repository ${repoId} not found for refresh.`);
+      return;
+    }
+
+    // Branch based on item type
+    if (repoToRefresh.type === "package") {
+      const enrichedPackages = await getLatestDigestsForPackages(
+        [repoToRefresh],
+        settings,
+      );
+      const enriched = enrichedPackages[0];
+      if (!enriched) {
+        log.error(`Failed to get digests for ${repoId} during single refresh.`);
+        return;
+      }
+      const repoIndex = allRepos.findIndex((r) => r.id === repoId);
+      if (repoIndex === -1) return;
+      if (enriched.tagChanges) {
+        allRepos[repoIndex].tagDigests = enriched.tagChanges;
+      }
+      await saveRepositories(allRepos);
+      revalidatePath("/");
       return;
     }
 
@@ -1146,40 +1609,62 @@ export async function refreshMultipleRepositoriesAction(
     const reposToRefresh = allRepos.filter((r) => repoIds.includes(r.id));
 
     if (reposToRefresh.length > 0) {
-      const enrichedReleases = await getLatestReleasesForRepos(
-        reposToRefresh,
-        settings,
-        locale,
-        { skipCache: true },
-      );
+      // Partition into releases and packages
+      const releaseItems = reposToRefresh.filter((r) => r.type !== "package");
+      const packageItems = reposToRefresh.filter((r) => r.type === "package");
 
-      const enrichedMap = new Map(enrichedReleases.map((r) => [r.repoId, r]));
+      // Fetch releases and packages in parallel
+      const [enrichedReleases, enrichedPackages] = await Promise.all([
+        releaseItems.length > 0
+          ? getLatestReleasesForRepos(releaseItems, settings, locale, {
+              skipCache: true,
+            })
+          : Promise.resolve([]),
+        packageItems.length > 0
+          ? getLatestDigestsForPackages(packageItems, settings)
+          : Promise.resolve([]),
+      ]);
+
+      const enrichedMap = new Map(
+        [...enrichedReleases, ...enrichedPackages].map((r) => [r.repoId, r]),
+      );
 
       const updatedRepos = allRepos.map((repo) => {
         const enriched = enrichedMap.get(repo.id);
-        if (enriched) {
-          if (enriched.release) {
-            const isVirtual = enriched.release.id === 0;
-            const newCached = toCachedRelease(enriched.release);
-            // Avoid overwriting existing real release data with virtual (tag-fallback) data
-            if (!isVirtual || !repo.latestRelease) {
-              repo.latestRelease = newCached;
-            } else if (
-              isVirtual &&
-              repo.latestRelease &&
-              newCached.fetched_at
-            ) {
-              // Update last successful fetch time on 304 not modified
-              repo.latestRelease.fetched_at = newCached.fetched_at;
-            }
-            // Do not initialize lastSeenReleaseTag from a virtual (tag-fallback) release
-            if (!repo.lastSeenReleaseTag && !isVirtual) {
-              repo.lastSeenReleaseTag = enriched.release.tag_name;
-            }
+        if (!enriched) return repo;
+
+        // Handle package-type items
+        if (repo.type === "package") {
+          if (enriched.error) {
+            logger
+              .withScope("WebServer")
+              .warn(
+                `Package fetch failed for ${repo.id}: error=${enriched.error.type}. Check that GITHUB_ACCESS_TOKEN has read:packages scope.`,
+              );
+          } else if (enriched.tagChanges) {
+            repo.tagDigests = enriched.tagChanges;
           }
-          if (enriched.newEtag) {
-            repo.etag = enriched.newEtag;
+          return repo;
+        }
+
+        // Handle release-type items (existing logic)
+        if (enriched.release) {
+          const isVirtual = enriched.release.id === 0;
+          const newCached = toCachedRelease(enriched.release);
+          // Avoid overwriting existing real release data with virtual (tag-fallback) data
+          if (!isVirtual || !repo.latestRelease) {
+            repo.latestRelease = newCached;
+          } else if (isVirtual && repo.latestRelease && newCached.fetched_at) {
+            // Update last successful fetch time on 304 not modified
+            repo.latestRelease.fetched_at = newCached.fetched_at;
           }
+          // Do not initialize lastSeenReleaseTag from a virtual (tag-fallback) release
+          if (!repo.lastSeenReleaseTag && !isVirtual) {
+            repo.lastSeenReleaseTag = enriched.release.tag_name;
+          }
+        }
+        if (enriched.newEtag) {
+          repo.etag = enriched.newEtag;
         }
         return repo;
       });
@@ -1195,7 +1680,7 @@ export async function refreshMultipleRepositoriesAction(
 
 export async function removeRepositoryAction(repoId: string) {
   return scheduleTask(`removeRepositoryAction: ${repoId}`, async () => {
-    if (!isValidRepoId(repoId)) {
+    if (!isValidItemId(repoId)) {
       log.error("Invalid repoId format for removal:", repoId);
       return;
     }
@@ -1211,7 +1696,7 @@ export async function acknowledgeNewReleaseAction(
   repoId: string,
 ): Promise<{ success: boolean; error?: string }> {
   return scheduleTask(`acknowledgeNewReleaseAction: ${repoId}`, async () => {
-    if (!isValidRepoId(repoId)) {
+    if (!isValidItemId(repoId)) {
       return { success: false, error: "Invalid repository ID format." };
     }
     const locale = await getLocale();
@@ -1240,7 +1725,7 @@ export async function markAsNewAction(
   repoId: string,
 ): Promise<{ success: boolean; error?: string }> {
   return scheduleTask(`markAsNewAction: ${repoId}`, async () => {
-    if (!isValidRepoId(repoId)) {
+    if (!isValidItemId(repoId)) {
       return { success: false, error: "Invalid repository ID format." };
     }
     const locale = await getLocale();
@@ -1284,17 +1769,27 @@ async function _checkForNewReleasesUnscheduled(options?: {
     return { notificationsSent: 0, checked: 0 };
   }
 
-  const enrichedReleases = await getLatestReleasesForRepos(
-    originalRepos,
-    settings,
-    effectiveLocale,
-    { skipCache: options?.skipCache },
-  );
+  // Partition into releases and packages
+  const releaseRepos = originalRepos.filter((r) => r.type !== "package");
+  const packageRepos = originalRepos.filter((r) => r.type === "package");
+
+  // Fetch both in parallel
+  const [enrichedReleases, enrichedPackages] = await Promise.all([
+    releaseRepos.length > 0
+      ? getLatestReleasesForRepos(releaseRepos, settings, effectiveLocale, {
+          skipCache: options?.skipCache,
+        })
+      : Promise.resolve([]),
+    packageRepos.length > 0
+      ? getLatestDigestsForPackages(packageRepos, settings)
+      : Promise.resolve([]),
+  ]);
 
   const updatedRepos = [...originalRepos];
   let changed = false;
   let notificationsSent = 0;
 
+  // Process release results (existing logic)
   for (const enrichedRelease of enrichedReleases) {
     const repoIndex = updatedRepos.findIndex(
       (r) => r.id === enrichedRelease.repoId,
@@ -1377,6 +1872,80 @@ async function _checkForNewReleasesUnscheduled(options?: {
     }
     if (repoWasUpdated) {
       changed = true;
+    }
+  }
+
+  // Process package results
+  for (const enrichedPkg of enrichedPackages) {
+    const repoIndex = updatedRepos.findIndex(
+      (r) => r.id === enrichedPkg.repoId,
+    );
+    if (repoIndex === -1) continue;
+
+    const repo = updatedRepos[repoIndex];
+    if (enrichedPkg.error) {
+      log.warn(
+        `Package fetch failed for ${repo.id}: error=${enrichedPkg.error.type}. Check that GITHUB_ACCESS_TOKEN has read:packages scope.`,
+      );
+      continue;
+    }
+
+    const newDigests = enrichedPkg.tagChanges ?? [];
+    if (newDigests.length === 0) continue;
+
+    const oldDigestMap = new Map(
+      (repo.tagDigests ?? []).map((d) => [d.tag, d.digest]),
+    );
+    const isFirstFetch = !repo.tagDigests || repo.tagDigests.length === 0;
+    const changedTags: TagDigest[] = [];
+
+    for (const newDigest of newDigests) {
+      const oldDigest = oldDigestMap.get(newDigest.tag);
+      if (oldDigest && oldDigest !== newDigest.digest) {
+        changedTags.push(newDigest);
+      }
+    }
+
+    // Always update stored digests
+    repo.tagDigests = newDigests;
+    changed = true;
+
+    if (isFirstFetch) {
+      log.info(
+        `First fetch for package ${repo.id}, recording initial digests. No notification.`,
+      );
+      repo.isNew = false;
+    } else if (changedTags.length > 0) {
+      log.info(
+        `Package digest change detected for ${repo.id}: tags [${changedTags.map((t) => t.tag).join(", ")}]`,
+      );
+
+      const shouldHighlight = settings.showAcknowledge ?? true;
+      repo.isNew = shouldHighlight;
+      repo.latestTagChange = {
+        tag: changedTags[0].tag,
+        newDigest: changedTags[0].digest,
+        previousDigest: oldDigestMap.get(changedTags[0].tag),
+        detectedAt: new Date().toISOString(),
+        packageUrl: repo.url,
+      };
+
+      try {
+        await sendPackageNotification(
+          repo,
+          changedTags,
+          effectiveLocale,
+          settings,
+        );
+        notificationsSent++;
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : String(error ?? "unknown");
+        log.error(
+          `Failed to send notification for package ${repo.id}. Digests updated to prevent repeat. Error: ${message}`,
+          error instanceof Error ? error : undefined,
+        );
+      }
     }
   }
 
@@ -1936,7 +2505,7 @@ export async function updateRepositorySettingsAction(
   >,
 ): Promise<{ success: boolean; error?: string }> {
   return scheduleTask(`updateRepositorySettingsAction: ${repoId}`, async () => {
-    if (!isValidRepoId(repoId)) {
+    if (!isValidItemId(repoId)) {
       return { success: false, error: "Invalid repository ID format." };
     }
 
