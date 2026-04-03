@@ -4,6 +4,8 @@ on:
   # Trigger on every new commit to main
   push:
     branches: [ main ]
+  # Trigger manual runs
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -11,6 +13,7 @@ env:
 
 jobs:
   lint:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
