@@ -1,14 +1,9 @@
 name: Build and Push Docker Image
 
 on:
-  # Trigger on push to branches (without version number) and release tags (with version number)
+  # Trigger on every new commit to main
   push:
-    branches: [ main, develop ]
-    tags: [ 'v*.*.*' ]
-
-  # Trigger on pull requests
-  pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
 
 env:
   REGISTRY: ghcr.io
@@ -83,8 +78,6 @@ jobs:
         cache-to: type=gha,mode=max
 
   e2e:
-    # Run E2E on main, develop and tags
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
     needs: [lint, typecheck]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -199,8 +192,6 @@ jobs:
         cache-to: type=gha,mode=max
 
   coverage:
-    # Run coverage on main, develop and tags
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/')
     needs: [unit, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 30
