@@ -1,6 +1,5 @@
 "use server";
 
-import { getTranslations } from "next-intl/server";
 import { logger } from "@/lib/logger";
 import type {
   AppriseFormat,
@@ -9,6 +8,7 @@ import type {
   Repository,
   TagDigest,
 } from "@/types";
+import { getTranslations } from "next-intl/server";
 import {
   generateHtmlReleaseBody,
   generatePlainTextReleaseBody,
@@ -354,15 +354,20 @@ export async function sendPackageNotification(
     const title = `GHCR Update: ${repo.packageOwner}/${repo.packageName}`;
     const tags = repo.appriseTags ?? settings.appriseTags;
 
+    const normalizedAppriseUrl = APPRISE_URL.replace(/\/+$/, "");
+    const notifyUrl = /\/notify(\/|$)/.test(normalizedAppriseUrl)
+      ? normalizedAppriseUrl
+      : `${normalizedAppriseUrl}/notify`;
+
     const payload: Record<string, string> = {
       title,
       body,
-      type: "info",
+      format,
     };
     if (tags) payload.tag = tags;
 
     promises.push(
-      fetch(APPRISE_URL, {
+      fetch(notifyUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -370,6 +375,9 @@ export async function sendPackageNotification(
         if (!r.ok) {
           throw new Error(`Apprise returned ${r.status}`);
         }
+        log.info(
+          `Apprise notification sent successfully for package ${repo.packageOwner}/${repo.packageName}`,
+        );
       }),
     );
   }
