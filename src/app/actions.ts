@@ -548,6 +548,12 @@ async function fetchLatestRelease(
           );
           return { release: null, error: { type: "repo_not_found" }, newEtag };
         }
+        if (response.status === 451) {
+          log.error(
+            `GitHub API error for ${owner}/${repo}: Unavailable For Legal Reasons (451). The repository may have been taken down (e.g. DMCA). Consider removing it from monitoring.`,
+          );
+          return { release: null, error: { type: "repo_not_found" }, newEtag };
+        }
         if (response.status === 403) {
           const rateLimitLimit = response.headers.get("x-ratelimit-limit");
           const rateLimitRemaining = response.headers.get(
