@@ -21,6 +21,7 @@ import * as React from "react";
 import {
   checkAppriseStatusAction,
   sendTestAppriseAction,
+  sendTestApprisePackageAction,
   sendTestEmailAction,
   setupTestRepositoryAction,
   triggerAppUpdateCheckAction,
@@ -97,6 +98,8 @@ export function TestPageClient({
   const [isTriggeringCheck, startTriggerCheckTransition] =
     React.useTransition();
   const [isSendingApprise, startAppriseTransition] = React.useTransition();
+  const [isSendingApprisePackage, startApprisePackageTransition] =
+    React.useTransition();
   const [isCheckingApprise, startAppriseCheckTransition] =
     React.useTransition();
   const [isCheckingUpdate, startUpdateTransition] = React.useTransition();
@@ -218,6 +221,35 @@ export function TestPageClient({
         toast({
           title: t("toast_email_error_title"),
           description: t("toast_email_error_description"),
+          variant: "destructive",
+        });
+      }
+    });
+  };
+
+  const handleSendTestApprisePackage = () => {
+    startApprisePackageTransition(async () => {
+      try {
+        const result = await sendTestApprisePackageAction();
+        if (result.success) {
+          toast({
+            title: t("toast_apprise_success_title"),
+            description: t("toast_apprise_package_success_description"),
+          });
+        } else {
+          toast({
+            title: t("toast_apprise_error_title"),
+            description: result.error,
+            variant: "destructive",
+          });
+        }
+      } catch (error: unknown) {
+        if (reloadIfServerActionStale(error)) {
+          return;
+        }
+        toast({
+          title: t("toast_apprise_error_title"),
+          description: t("toast_apprise_not_configured_error"),
           variant: "destructive",
         });
       }
@@ -535,6 +567,23 @@ export function TestPageClient({
                 <Bell />
               )}
               <span>{t("send_test_apprise_button")}</span>
+            </Button>
+            <Button
+              onClick={handleSendTestApprisePackage}
+              disabled={
+                isSendingApprisePackage ||
+                appriseStatus.status !== "ok" ||
+                !isOnline
+              }
+              size="sm"
+              variant="outline"
+            >
+              {isSendingApprisePackage ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Bell />
+              )}
+              <span>{t("send_test_apprise_package_button")}</span>
             </Button>
           </div>
         </CardContent>
