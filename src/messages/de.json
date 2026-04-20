@@ -427,7 +427,20 @@
     "toast_success_title": "Erfolg",
     "toast_success_description": "Paket-Einstellungen gespeichert.",
     "toast_error_title": "Fehler",
-    "toast_error_generic": "Paket-Einstellungen konnten nicht gespeichert werden."
+    "toast_error_generic": "Paket-Einstellungen konnten nicht gespeichert werden.",
+    "simulate_update_section_title": "Test-Benachrichtigung",
+    "simulate_update_description": "Löst eine echte E-Mail-/Apprise-Benachrichtigung für dieses Paket aus, als hätte GHCR gerade einen neuen Digest veröffentlicht. Nützlich, um paketspezifische Overrides und Transportwege End-to-End zu verifizieren.",
+    "simulate_update_button": "Update simulieren",
+    "simulate_update_confirm_title": "Echte Test-Benachrichtigung senden?",
+    "simulate_update_confirm_description": "Dies sendet eine echte Benachrichtigung für <repoId></repoId> via E-Mail und Apprise mit dem aktuellen GHCR-Digest. Der gespeicherte vorherige Digest wird danach mit dem echten überschrieben.",
+    "simulate_update_cancel_button": "Abbrechen",
+    "simulate_update_confirm_button": "Ja, senden",
+    "simulate_update_toast_success_title": "Simuliertes Update ausgelöst",
+    "simulate_update_toast_success_description": "Prüfen Sie Ihren Benachrichtigungskanal in wenigen Sekunden.",
+    "simulate_update_toast_no_send_title": "Keine Benachrichtigung gesendet",
+    "simulate_update_toast_no_send_description": "Der Abruf war erfolgreich, aber der Versand wurde übersprungen. Prüfen Sie die Server-Logs.",
+    "simulate_update_toast_error_title": "Simulation fehlgeschlagen",
+    "simulate_update_toast_error_description": "{error}"
   },
   "Actions": {
     "commit_message_fallback_title": "Commit-Nachricht",

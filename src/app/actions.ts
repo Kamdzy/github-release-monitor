@@ -22,7 +22,6 @@ import type {
   AppriseStatus,
   AppSettings,
   CachedRelease,
-  CachedTagChange,
   EnrichedRelease,
   FetchError,
   GithubRelease,
@@ -1756,6 +1755,153 @@ export async function markAsNewAction(
   });
 }
 
+// Primes sentinel digests for a real monitored package, then runs the package
+// change-detection path end-to-end. Used to verify notifications are wired up
+// correctly for a specific package's configuration without waiting for GHCR.
+export async function simulatePackageUpdateAction(
+  repoId: string,
+): Promise<{ success: boolean; notificationSent?: boolean; error?: string }> {
+  return scheduleTask(`simulatePackageUpdateAction: ${repoId}`, async () => {
+    if (!isValidItemId(repoId)) {
+      return { success: false, error: "Invalid package id." };
+    }
+
+    const settings = await getSettings();
+    const locale = settings.locale;
+    const allRepos = await getRepositories();
+    const repoIndex = allRepos.findIndex((r) => r.id === repoId);
+    if (repoIndex === -1) {
+      return { success: false, error: "Package not found." };
+    }
+
+    const repo = allRepos[repoIndex];
+    if (
+      repo.type !== "package" ||
+      !repo.tagDigests ||
+      repo.tagDigests.length === 0
+    ) {
+      return {
+        success: false,
+        error: "Package has no stored digests yet. Refresh first, then retry.",
+      };
+    }
+
+    const sentinel = `sha256:simulated_${Date.now().toString(16)}`;
+    repo.tagDigests = repo.tagDigests.map((td) => ({
+      ...td,
+      digest: sentinel,
+    }));
+    await saveRepositories(allRepos);
+
+    try {
+      const [enriched] = await getLatestDigestsForPackages([repo], settings);
+      if (!enriched) {
+        return { success: false, error: "Fetch returned no result." };
+      }
+
+      const { changed, notificationSent } = await processPackageChange(
+        enriched,
+        repo,
+        settings,
+        locale,
+      );
+
+      if (changed) {
+        allRepos[repoIndex] = repo;
+        await saveRepositories(allRepos);
+      }
+
+      revalidatePath("/");
+      return { success: true, notificationSent };
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : String(error ?? "unknown");
+      logger
+        .withScope("WebServer")
+        .error(`Simulate update failed for ${repoId}: ${message}`);
+      return { success: false, error: message };
+    }
+  });
+}
+
+// Processes a single package fetch result: updates digests, detects changes,
+// and dispatches notifications. Mutates `repo` in place. Extracted so both
+// the full check loop and the manual simulate action share the same behavior.
+async function processPackageChange(
+  enrichedPkg: EnrichedRelease,
+  repo: Repository,
+  settings: AppSettings,
+  effectiveLocale: string,
+): Promise<{ changed: boolean; notificationSent: boolean }> {
+  const log = logger.withScope("WebServer");
+
+  if (enrichedPkg.error) {
+    log.warn(
+      `Package fetch failed for ${repo.id}: error=${enrichedPkg.error.type}. Check that GITHUB_ACCESS_TOKEN has read:packages scope.`,
+    );
+    return { changed: false, notificationSent: false };
+  }
+
+  const newDigests = enrichedPkg.tagChanges ?? [];
+  if (newDigests.length === 0) {
+    return { changed: false, notificationSent: false };
+  }
+
+  const oldDigestMap = new Map(
+    (repo.tagDigests ?? []).map((d) => [d.tag, d.digest]),
+  );
+  const isFirstFetch = !repo.tagDigests || repo.tagDigests.length === 0;
+  const changedTags: TagDigest[] = [];
+
+  for (const newDigest of newDigests) {
+    const oldDigest = oldDigestMap.get(newDigest.tag);
+    if (oldDigest && oldDigest !== newDigest.digest) {
+      changedTags.push(newDigest);
+    }
+  }
+
+  repo.tagDigests = newDigests;
+
+  if (isFirstFetch) {
+    log.info(
+      `First fetch for package ${repo.id}, recording initial digests. No notification.`,
+    );
+    repo.isNew = false;
+    return { changed: true, notificationSent: false };
+  }
+
+  if (changedTags.length === 0) {
+    return { changed: true, notificationSent: false };
+  }
+
+  log.info(
+    `Package digest change detected for ${repo.id}: tags [${changedTags.map((t) => t.tag).join(", ")}]`,
+  );
+
+  const shouldHighlight = settings.showAcknowledge ?? true;
+  repo.isNew = shouldHighlight;
+  repo.latestTagChange = {
+    tag: changedTags[0].tag,
+    newDigest: changedTags[0].digest,
+    previousDigest: oldDigestMap.get(changedTags[0].tag),
+    detectedAt: new Date().toISOString(),
+    packageUrl: repo.url,
+  };
+
+  try {
+    await sendPackageNotification(repo, changedTags, effectiveLocale, settings);
+    return { changed: true, notificationSent: true };
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : String(error ?? "unknown");
+    log.error(
+      `Failed to send notification for package ${repo.id}. Digests updated to prevent repeat. Error: ${message}`,
+      error instanceof Error ? error : undefined,
+    );
+    return { changed: true, notificationSent: false };
+  }
+}
+
 async function _checkForNewReleasesUnscheduled(options?: {
   overrideLocale?: string;
   skipCache?: boolean;
@@ -1888,71 +2034,14 @@ async function _checkForNewReleasesUnscheduled(options?: {
     );
     if (repoIndex === -1) continue;
 
-    const repo = updatedRepos[repoIndex];
-    if (enrichedPkg.error) {
-      log.warn(
-        `Package fetch failed for ${repo.id}: error=${enrichedPkg.error.type}. Check that GITHUB_ACCESS_TOKEN has read:packages scope.`,
-      );
-      continue;
-    }
-
-    const newDigests = enrichedPkg.tagChanges ?? [];
-    if (newDigests.length === 0) continue;
-
-    const oldDigestMap = new Map(
-      (repo.tagDigests ?? []).map((d) => [d.tag, d.digest]),
+    const result = await processPackageChange(
+      enrichedPkg,
+      updatedRepos[repoIndex],
+      settings,
+      effectiveLocale,
     );
-    const isFirstFetch = !repo.tagDigests || repo.tagDigests.length === 0;
-    const changedTags: TagDigest[] = [];
-
-    for (const newDigest of newDigests) {
-      const oldDigest = oldDigestMap.get(newDigest.tag);
-      if (oldDigest && oldDigest !== newDigest.digest) {
-        changedTags.push(newDigest);
-      }
-    }
-
-    // Always update stored digests
-    repo.tagDigests = newDigests;
-    changed = true;
-
-    if (isFirstFetch) {
-      log.info(
-        `First fetch for package ${repo.id}, recording initial digests. No notification.`,
-      );
-      repo.isNew = false;
-    } else if (changedTags.length > 0) {
-      log.info(
-        `Package digest change detected for ${repo.id}: tags [${changedTags.map((t) => t.tag).join(", ")}]`,
-      );
-
-      const shouldHighlight = settings.showAcknowledge ?? true;
-      repo.isNew = shouldHighlight;
-      repo.latestTagChange = {
-        tag: changedTags[0].tag,
-        newDigest: changedTags[0].digest,
-        previousDigest: oldDigestMap.get(changedTags[0].tag),
-        detectedAt: new Date().toISOString(),
-        packageUrl: repo.url,
-      };
-
-      try {
-        await sendPackageNotification(
-          repo,
-          changedTags,
-          effectiveLocale,
-          settings,
-        );
-        notificationsSent++;
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error ? error.message : String(error ?? "unknown");
-        log.error(
-          `Failed to send notification for package ${repo.id}. Digests updated to prevent repeat. Error: ${message}`,
-          error instanceof Error ? error : undefined,
-        );
-      }
-    }
+    if (result.changed) changed = true;
+    if (result.notificationSent) notificationsSent++;
   }
 
   if (changed) {

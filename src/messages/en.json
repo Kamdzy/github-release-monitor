@@ -427,7 +427,20 @@
     "toast_success_title": "Success",
     "toast_success_description": "Package settings saved.",
     "toast_error_title": "Error",
-    "toast_error_generic": "Could not save package settings."
+    "toast_error_generic": "Could not save package settings.",
+    "simulate_update_section_title": "Test Notification",
+    "simulate_update_description": "Fires a real email/Apprise notification for this package as if GHCR had just pushed a new digest. Useful to verify per-package overrides and transports end-to-end.",
+    "simulate_update_button": "Simulate update",
+    "simulate_update_confirm_title": "Send a real test notification?",
+    "simulate_update_confirm_description": "This will dispatch a real notification for <repoId></repoId> through email and Apprise using the current GHCR digest. Your stored previous digest will be overwritten with the real one afterwards.",
+    "simulate_update_cancel_button": "Cancel",
+    "simulate_update_confirm_button": "Yes, send it",
+    "simulate_update_toast_success_title": "Simulated update dispatched",
+    "simulate_update_toast_success_description": "Check your notification channel in a few seconds.",
+    "simulate_update_toast_no_send_title": "No notification sent",
+    "simulate_update_toast_no_send_description": "The fetch succeeded but the notification dispatch was skipped. Check server logs.",
+    "simulate_update_toast_error_title": "Could not simulate update",
+    "simulate_update_toast_error_description": "{error}"
   },
   "Actions": {
     "commit_message_fallback_title": "Commit Message",

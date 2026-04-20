@@ -5,8 +5,21 @@ import { useTranslations } from "next-intl";
 import * as React from "react";
 import {
   refreshSingleRepositoryAction,
+  simulatePackageUpdateAction,
   updatePackageSettingsAction,
 } from "@/app/actions";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -135,6 +148,8 @@ export function PackageSettingsDialog({
   );
 
   const [saveStatus, setSaveStatus] = React.useState<SaveStatus>("idle");
+  const [isSimulating, setIsSimulating] = React.useState(false);
+  const [simulateOpen, setSimulateOpen] = React.useState(false);
 
   const savedThisSessionRef = React.useRef(false);
   const mountedRef = React.useRef(true);
@@ -267,6 +282,45 @@ export function PackageSettingsDialog({
     return () => clearTimeout(handler);
   }, [newSettings, repoId, open, parsedTags.length, toast, t, isOnline]);
 
+  const handleSimulateUpdate = React.useCallback(async () => {
+    setIsSimulating(true);
+    try {
+      const result = await simulatePackageUpdateAction(repoId);
+      if (!result.success) {
+        toast({
+          variant: "destructive",
+          title: t("simulate_update_toast_error_title"),
+          description: t("simulate_update_toast_error_description", {
+            error: result.error ?? "unknown",
+          }),
+        });
+      } else if (result.notificationSent) {
+        toast({
+          title: t("simulate_update_toast_success_title"),
+          description: t("simulate_update_toast_success_description"),
+        });
+      } else {
+        toast({
+          variant: "destructive",
+          title: t("simulate_update_toast_no_send_title"),
+          description: t("simulate_update_toast_no_send_description"),
+        });
+      }
+    } catch (error: unknown) {
+      if (reloadIfServerActionStale(error)) return;
+      toast({
+        variant: "destructive",
+        title: t("simulate_update_toast_error_title"),
+        description: t("simulate_update_toast_error_description", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      });
+    } finally {
+      setIsSimulating(false);
+      setSimulateOpen(false);
+    }
+  }, [repoId, t, toast]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -383,6 +437,62 @@ export function PackageSettingsDialog({
               </div>
             </div>
           )}
+
+          <div className="space-y-3 rounded-md border border-dashed p-4">
+            <h4 className="text-base font-semibold">
+              {t("simulate_update_section_title")}
+            </h4>
+            <p className="text-xs text-muted-foreground">
+              {t("simulate_update_description")}
+            </p>
+            <AlertDialog open={simulateOpen} onOpenChange={setSimulateOpen}>
+              <AlertDialogTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    !isOnline || parsedTags.length === 0 || isSimulating
+                  }
+                >
+                  {isSimulating ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : null}
+                  {t("simulate_update_button")}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>
+                    {t("simulate_update_confirm_title")}
+                  </AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {t.rich("simulate_update_confirm_description", {
+                      repoId: () => (
+                        <span className="font-semibold text-foreground">
+                          {repoId}
+                        </span>
+                      ),
+                    })}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={isSimulating}>
+                    {t("simulate_update_cancel_button")}
+                  </AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleSimulateUpdate();
+                    }}
+                    disabled={isSimulating}
+                  >
+                    {t("simulate_update_confirm_button")}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
         </div>
 
         <DialogFooter className="pt-4">
