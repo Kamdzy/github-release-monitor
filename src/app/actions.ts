@@ -1863,19 +1863,31 @@ async function processPackageChange(
   repo.tagDigests = newDigests;
 
   if (isFirstFetch) {
+    const initial = newDigests
+      .map((d) => `${d.tag}=${d.digest.slice(0, 19)}`)
+      .join(", ");
     log.info(
-      `First fetch for package ${repo.id}, recording initial digests. No notification.`,
+      `First fetch for package ${repo.id}: recorded initial digests [${initial}]. No notification sent (baseline).`,
     );
     repo.isNew = false;
     return { changed: true, notificationSent: false };
   }
 
   if (changedTags.length === 0) {
+    log.info(
+      `Package ${repo.id} checked: no digest changes across ${newDigests.length} monitored tag(s).`,
+    );
     return { changed: true, notificationSent: false };
   }
 
+  const transitions = changedTags
+    .map((t) => {
+      const prev = oldDigestMap.get(t.tag) ?? "unknown";
+      return `${t.tag}: ${prev.slice(0, 19)} -> ${t.digest.slice(0, 19)}`;
+    })
+    .join("; ");
   log.info(
-    `Package digest change detected for ${repo.id}: tags [${changedTags.map((t) => t.tag).join(", ")}]`,
+    `Package digest change detected for ${repo.id} [${transitions}]. Dispatching notification...`,
   );
 
   const shouldHighlight = settings.showAcknowledge ?? true;
@@ -1890,6 +1902,9 @@ async function processPackageChange(
 
   try {
     await sendPackageNotification(repo, changedTags, effectiveLocale, settings);
+    log.info(
+      `Notification dispatched for package ${repo.id} (${changedTags.length} tag change(s)).`,
+    );
     return { changed: true, notificationSent: true };
   } catch (error: unknown) {
     const message =
