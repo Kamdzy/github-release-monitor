@@ -15,7 +15,11 @@ export type CachedTagChange = {
 };
 
 export type Repository = {
-  id: string; // "owner/repo" for releases, "ghcr:owner/package" for packages
+  // Unique identifier for a monitored repository.
+  // Uses `<provider>:owner/repo` for GitHub/Codeberg,
+  // `gitlab:<host>/owner/repo` for GitLab,
+  // `ghcr:owner/package` for GHCR packages.
+  id: string;
   url: string;
   type?: MonitoredItemType; // undefined or "release" for backward compat, "package" for GHCR
   lastSeenReleaseTag?: string;
@@ -27,6 +31,10 @@ export type Repository = {
   releaseChannels?: ReleaseChannel[];
   preReleaseSubChannels?: PreReleaseChannelType[];
   releasesPerPage?: number | null;
+  refreshInterval?: number | null;
+  cacheInterval?: number | null;
+  backgroundCheckCron?: string | null;
+  lastBackgroundCheckAt?: string;
   includeRegex?: string;
   excludeRegex?: string;
   appriseTags?: string;
@@ -48,6 +56,7 @@ export type GithubRelease = {
   body: string | null;
   created_at: string;
   published_at: string | null;
+  published_at_unknown?: boolean;
   prerelease: boolean;
   draft: boolean;
   fetched_at?: string; // Timestamp for when the data was fetched
@@ -60,7 +69,9 @@ export type CachedRelease = {
   body: string | null;
   created_at: string;
   published_at: string | null;
+  published_at_unknown?: boolean;
   fetched_at?: string;
+  source?: "release" | "tag";
 };
 
 export type FetchError = {
@@ -81,11 +92,14 @@ export type EnrichedRelease = {
   release?: GithubRelease;
   error?: FetchError;
   isNew?: boolean;
-  newEtag?: string;
+  newEtag?: string | null;
   repoSettings?: {
     releaseChannels?: ReleaseChannel[];
     preReleaseSubChannels?: PreReleaseChannelType[];
     releasesPerPage?: number | null;
+    refreshInterval?: number | null;
+    cacheInterval?: number | null;
+    backgroundCheckCron?: string | null;
     includeRegex?: string;
     excludeRegex?: string;
     appriseTags?: string;
@@ -124,6 +138,28 @@ export type RateLimitResult = {
   data: GitHubRateLimit | null;
   error?: "invalid_token" | "api_error";
 };
+
+export type CodebergTokenCheckResult =
+  | { status: "not_set" }
+  | {
+      status: "valid";
+      login: string | null;
+      fullName: string | null;
+      diagnosticsLimited?: boolean;
+    }
+  | { status: "invalid_token" }
+  | { status: "api_error" };
+
+export type GitlabTokenCheckResult =
+  | { status: "not_set" }
+  | {
+      status: "valid";
+      username: string | null;
+      name: string | null;
+      diagnosticsLimited?: boolean;
+    }
+  | { status: "invalid_token" }
+  | { status: "api_error" };
 
 export type NotificationConfig = {
   isSmtpConfigured: boolean;
@@ -184,6 +220,22 @@ export const allPreReleaseTypes: PreReleaseChannelType[] = [
   "tp",
 ];
 export type AppriseFormat = "text" | "markdown" | "html";
+export const releaseSortOrders = [
+  "latest_first",
+  "new_first",
+  "oldest_first",
+  "repo_az",
+  "repo_za",
+  "provider_grouped",
+] as const;
+export type ReleaseSortOrder = (typeof releaseSortOrders)[number];
+export const repoProviderSortKeys = ["github", "gitlab", "codeberg"] as const;
+export type ReleaseProviderSortKey = (typeof repoProviderSortKeys)[number];
+export const defaultProviderSortOrder: ReleaseProviderSortKey[] = [
+  "github",
+  "gitlab",
+  "codeberg",
+];
 
 export type AppSettings = {
   timeFormat: TimeFormat;
@@ -192,12 +244,20 @@ export type AppSettings = {
   refreshInterval: number;
   // The total cache interval, stored in minutes.
   cacheInterval: number;
+  // Optional global background schedule. When set, repositories without their own automation override use this instead of refreshInterval.
+  backgroundCheckCron?: string;
   releasesPerPage: number;
   parallelRepoFetches: number;
   releaseChannels: ReleaseChannel[];
   preReleaseSubChannels?: PreReleaseChannelType[];
+  releaseSortOrder?: ReleaseSortOrder;
+  providerSortOrder?: ReleaseProviderSortKey[];
+  prioritizeNewSecurityReleases?: boolean;
   showAcknowledge?: boolean;
   showMarkAsNew?: boolean;
+  showProviderPrefixInRepoId?: boolean;
+  showProviderDomainInRepoId?: boolean;
+  repositoryFormExpanded?: boolean;
   includeRegex?: string;
   excludeRegex?: string;
   appriseMaxCharacters?: number;
@@ -221,10 +281,4 @@ export type UpdateNotificationState = {
   hasUpdate: boolean;
   isDismissed: boolean;
   shouldNotify: boolean;
-};
-
-// Session Data
-export type SessionData = {
-  isLoggedIn?: boolean;
-  username?: string;
 };

@@ -1,135 +1,304 @@
 // @vitest-environment jsdom
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { flushSync } from 'react-dom';
-import { describe, it, expect, vi } from 'vitest';
-// dynamic import after mocks inside tests
 
-vi.mock('next-intl', () => ({
+import type { HTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import { act } from "react";
+import ReactDOM from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppSettings } from "@/types";
+
+type TranslationFn = ((key: string) => string) & {
+  rich: (
+    key: string,
+    values: {
+      repoId: () => ReactNode;
+    },
+  ) => ReactNode;
+};
+
+type PassthroughProps = HTMLAttributes<HTMLDivElement> & {
+  children?: ReactNode;
+};
+
+type CheckboxProps = Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "onChange" | "checked"
+> & {
+  checked?: boolean;
+  onCheckedChange?: (checked: boolean) => void;
+};
+
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
+vi.mock("next-intl", () => ({
   useTranslations: (ns?: string) => {
     const maps: Record<string, Record<string, string>> = {
       RepoSettingsDialog: {
-        title: 'Repository Settings',
-        reset_to_global_button: 'Reset',
-        description_flexible: 'Customize settings for <repoId></repoId>.',
-        autosave_waiting: 'Waiting...',
-        autosave_saving: 'Saving...',
-        autosave_success: 'All changes saved',
-        autosave_success_short: 'Saved',
-        releases_per_page_label_repo: 'Releases per page',
+        title: "Repository Settings",
+        reset_to_global_button: "Reset",
+        description_flexible: "Customize settings for <repoId></repoId>.",
+        autosave_waiting: "Waiting...",
+        autosave_saving: "Saving...",
+        autosave_success: "All changes saved",
+        autosave_success_short: "Saved",
+        releases_per_page_label_repo: "Releases per page",
       },
       SettingsForm: {
-        offline_notice: 'Offline – changes are read-only and auto-save is paused.',
-        apprise_format_text: 'Text',
-        apprise_format_markdown: 'Markdown',
-        apprise_format_html: 'HTML',
-        autosave_success: 'All changes saved',
+        offline_notice:
+          "Offline – changes are read-only and auto-save is paused.",
+        apprise_format_text: "Text",
+        apprise_format_markdown: "Markdown",
+        apprise_format_html: "HTML",
+        autosave_success: "All changes saved",
       },
     };
-    const fn = (key: string) => maps[ns || '']?.[key] || key;
-    (fn as any).rich = (key: string, { repoId }: { repoId: any }) =>
-      (maps[ns || '']?.[key] || key).replace('<repoId></repoId>', repoId());
-    return fn as any;
+    const fn = ((key: string) => maps[ns || ""]?.[key] || key) as TranslationFn;
+    fn.rich = (key: string, { repoId }) => {
+      const template = maps[ns || ""]?.[key] || key;
+      const parts = template.split("<repoId></repoId>");
+      if (parts.length === 1) return template;
+      return (
+        <>
+          {parts[0]}
+          {repoId()}
+          {parts.slice(1).join("")}
+        </>
+      );
+    };
+    return fn;
   },
 }));
 
-vi.mock('@/app/actions', () => ({
+vi.mock("@/app/actions", () => ({
   updateRepositorySettingsAction: vi.fn().mockResolvedValue({ success: true }),
   refreshSingleRepositoryAction: vi.fn().mockResolvedValue({}),
 }));
 
-describe('RepoSettingsDialog offline behavior', () => {
-  async function renderDialog(isOnline = true) {
-    const { RepoSettingsDialog } = await import('@/components/repo-settings-dialog');
-    const div = document.createElement('div');
-    document.body.appendChild(div);
-    const root = ReactDOM.createRoot(div);
-    flushSync(() => root.render(
-      <RepoSettingsDialog
-        isOpen={true}
-        setIsOpen={() => {}}
-        repoId="test/test"
-        currentRepoSettings={undefined}
-        globalSettings={{
-          timeFormat: '24h',
-          locale: 'en',
-          refreshInterval: 10,
-          cacheInterval: 5,
-          releasesPerPage: 30,
-          parallelRepoFetches: 5,
-          releaseChannels: ['stable'],
-          preReleaseSubChannels: undefined,
-          showAcknowledge: true,
-        } as any}
-      />
-    ));
-    flushSync(() => { window.dispatchEvent(new Event(isOnline ? 'online' : 'offline')); });
-    return {
-      div,
-      cleanup: () => {
-        flushSync(() => { root.unmount(); });
-        div.remove();
-      },
-    };
+let networkState = { isOnline: true };
+
+vi.mock("@/hooks/use-network", () => ({
+  useNetworkStatus: () => networkState,
+}));
+
+vi.mock("@/hooks/use-toast", () => ({
+  useToast: () => ({
+    toasts: [],
+    toast: vi.fn(),
+    dismiss: vi.fn(),
+  }),
+  toast: vi.fn(),
+}));
+
+vi.mock("@/components/ui/dialog", () => {
+  const passthrough = ({ children, ...rest }: PassthroughProps) => (
+    <div {...rest}>{children}</div>
+  );
+  return {
+    Dialog: passthrough,
+    DialogContent: passthrough,
+    DialogHeader: passthrough,
+    DialogTitle: passthrough,
+    DialogDescription: passthrough,
+    DialogFooter: passthrough,
+    DialogTrigger: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/tooltip", () => {
+  const passthrough = ({ children, ...rest }: PassthroughProps) => (
+    <div {...rest}>{children}</div>
+  );
+  const passthroughChild = ({ children }: { children?: ReactNode }) => (
+    <>{children}</>
+  );
+  return {
+    TooltipProvider: passthroughChild,
+    Tooltip: passthroughChild,
+    TooltipTrigger: passthroughChild,
+    TooltipContent: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/select", () => {
+  const passthrough = ({ children, ...rest }: PassthroughProps) => (
+    <div {...rest}>{children}</div>
+  );
+  return {
+    Select: passthrough,
+    SelectTrigger: passthrough,
+    SelectContent: passthrough,
+    SelectItem: passthrough,
+    SelectValue: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/alert-dialog", () => {
+  const passthrough = ({ children, ...rest }: PassthroughProps) => (
+    <div {...rest}>{children}</div>
+  );
+  const passthroughChild = ({ children }: { children?: ReactNode }) => (
+    <>{children}</>
+  );
+  return {
+    AlertDialog: passthrough,
+    AlertDialogTrigger: passthroughChild,
+    AlertDialogContent: passthrough,
+    AlertDialogHeader: passthrough,
+    AlertDialogTitle: passthrough,
+    AlertDialogDescription: passthrough,
+    AlertDialogFooter: passthrough,
+    AlertDialogAction: passthrough,
+    AlertDialogCancel: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/checkbox", () => ({
+  Checkbox: ({ checked, onCheckedChange, ...props }: CheckboxProps) => (
+    <input
+      type="checkbox"
+      checked={checked}
+      onChange={() => onCheckedChange?.(!checked)}
+      {...props}
+    />
+  ),
+}));
+
+import { RepoSettingsDialog } from "@/components/repo-settings-dialog";
+
+describe("RepoSettingsDialog offline behavior", () => {
+  let container: HTMLDivElement;
+  let root: ReactDOM.Root;
+
+  function renderDialog() {
+    act(() => {
+      root.render(
+        <RepoSettingsDialog
+          isOpen={true}
+          setIsOpen={() => {}}
+          repoId="test/test"
+          currentRepoSettings={undefined}
+          globalSettings={
+            {
+              timeFormat: "24h",
+              locale: "en",
+              refreshInterval: 10,
+              cacheInterval: 5,
+              releasesPerPage: 30,
+              parallelRepoFetches: 5,
+              releaseChannels: ["stable"],
+              preReleaseSubChannels: undefined,
+              showAcknowledge: true,
+            } satisfies AppSettings
+          }
+        />,
+      );
+    });
   }
 
-  it('shows offline notice and reset button disabled', async () => {
-    vi.resetModules();
-    vi.doMock('@/hooks/use-network', () => ({ useNetworkStatus: () => ({ isOnline: false }) }));
-    const { div, cleanup } = await renderDialog(false);
-    try {
+  async function flushEffects() {
+    await act(async () => {
       await Promise.resolve();
-      // Check for any disabled control as proxy for offline state
-      const disabledAny = document.querySelector('[disabled]');
-      expect(!!disabledAny).toBe(true);
-    } finally {
-      cleanup();
+      await Promise.resolve();
+    });
+  }
+
+  function setInputValue(input: HTMLInputElement, value: string) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    if (descriptor?.set) {
+      descriptor.set.call(input, value);
+    } else {
+      input.value = value;
     }
+    input.dispatchEvent(
+      new Event("input", { bubbles: true, cancelable: true, composed: true }),
+    );
+    input.dispatchEvent(
+      new Event("change", { bubbles: true, cancelable: true }),
+    );
+  }
+
+  beforeEach(() => {
+    networkState = { isOnline: true };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = ReactDOM.createRoot(container);
   });
 
-  it('online change triggers autosave after debounce', async () => {
+  afterEach(() => {
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("shows offline notice and reset button disabled", async () => {
+    networkState = { isOnline: false };
+    renderDialog();
+    await flushEffects();
+
+    expect(container.textContent ?? "").toContain(
+      "Offline – changes are read-only and auto-save is paused.",
+    );
+
+    const resetButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Reset"),
+    );
+    expect(resetButton).toBeTruthy();
+    expect(resetButton?.disabled).toBe(true);
+  });
+
+  it("online change triggers autosave after debounce", async () => {
     vi.useFakeTimers();
-    vi.resetModules();
-    // Ensure online during this test
-    vi.doMock('@/hooks/use-network', () => ({ useNetworkStatus: () => ({ isOnline: true }) }));
-    const { div, cleanup } = await renderDialog(true);
     try {
-      // Allow portal render/effects
-      await Promise.resolve();
-      await Promise.resolve();
-      
-      // Find input by type and context instead of static ID
-      // Look for the number input within the "Releases per page" section
-      const labels = Array.from(document.querySelectorAll('label'));
-      const releasesPerPageLabel = labels.find(label => 
-        label.textContent?.includes('Releases per page')
+      networkState = { isOnline: true };
+      renderDialog();
+      await flushEffects();
+
+      const labels = Array.from(document.querySelectorAll("label"));
+      const releasesPerPageLabel = labels.find((label) =>
+        label.textContent?.includes("Releases per page"),
       );
-      
+
       let rpp: HTMLInputElement | null = null;
-      if (releasesPerPageLabel && releasesPerPageLabel.htmlFor) {
-        rpp = document.getElementById(releasesPerPageLabel.htmlFor) as HTMLInputElement;
+      if (releasesPerPageLabel?.htmlFor) {
+        rpp = document.getElementById(
+          releasesPerPageLabel.htmlFor,
+        ) as HTMLInputElement;
       }
-      
+
       // Fallback: find by type="number" if label approach fails
       if (!rpp) {
-        const numberInputs = Array.from(document.querySelectorAll('input[type="number"]'));
+        const numberInputs = Array.from(
+          document.querySelectorAll('input[type="number"]'),
+        );
         rpp = numberInputs[0] as HTMLInputElement;
       }
-      
-      expect(rpp).toBeTruthy();
-      rpp!.value = '7';
-      rpp!.dispatchEvent(new Event('input', { bubbles: true }));
-      rpp!.dispatchEvent(new Event('change', { bubbles: true }));
-      
-      // Proceed debounce and allow effects to run
-      vi.advanceTimersByTime(2000);
-      await Promise.resolve();
-      await Promise.resolve();
-      
-      // Assert the field reflects the new value (change handled without errors)
-      expect(rpp!.value).toBe('7');
+
+      if (!rpp) {
+        throw new Error("releases-per-page input not rendered");
+      }
+      act(() => {
+        setInputValue(rpp, "7");
+      });
+
+      await flushEffects();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1600);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await flushEffects();
+
+      const { updateRepositorySettingsAction } = await import("@/app/actions");
+      expect(updateRepositorySettingsAction).toHaveBeenCalled();
+      expect(rpp.value).toBe("7");
     } finally {
-      cleanup();
       vi.useRealTimers();
     }
   });

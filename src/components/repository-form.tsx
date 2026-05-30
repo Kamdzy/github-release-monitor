@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Plus, Upload } from "lucide-react";
+import { ChevronDown, Loader2, Plus, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import * as React from "react";
@@ -11,6 +11,8 @@ import {
   addRepositoriesAction,
   getJobStatusAction,
   importRepositoriesAction,
+  previewComposeImportAction,
+  resolveRepoProvidersAction,
 } from "@/app/actions";
 import {
   AlertDialog,
@@ -22,6 +24,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -69,13 +72,47 @@ const initialState = {
   error: undefined,
 };
 
+const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim());
+const isOwnerRepoShorthand = (value: string) =>
+  /^[a-z0-9-._]+\/[a-z0-9-._]+$/i.test(value.trim());
+const isComposeFileName = (value: string) => /\.(ya?ml)$/i.test(value);
+
+const getRepositoryDisplayName = (repo: Repository) => {
+  if (repo.id.startsWith("github:")) return repo.id.slice("github:".length);
+  if (repo.id.startsWith("codeberg:")) return repo.id.slice("codeberg:".length);
+  if (repo.id.startsWith("gitlab:")) return repo.id.slice("gitlab:".length);
+  return repo.id;
+};
+
+const getRepositoryProviderName = (repo: Repository) => {
+  if (repo.id.startsWith("github:")) return "GitHub";
+  if (repo.id.startsWith("codeberg:")) return "Codeberg";
+  if (repo.id.startsWith("gitlab:")) return "GitLab";
+  return null;
+};
+
+type ProviderChoiceCandidate = {
+  provider: "github" | "codeberg" | "gitlab";
+  providerHost?: string;
+  canonicalRepoUrl: string;
+};
+
 interface RepositoryFormProps {
   currentRepositories: Repository[];
+  isExpanded: boolean;
+  isExpansionSaving: boolean;
+  onToggleExpanded: () => void;
 }
 
-export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
+export function RepositoryForm({
+  currentRepositories,
+  isExpanded,
+  isExpansionSaving,
+  onToggleExpanded,
+}: RepositoryFormProps) {
   const t = useTranslations("RepositoryForm");
   const tp = useTranslations("PackageForm");
+  const contentId = React.useId();
   const [urls, setUrls] = React.useState("");
   const { toast } = useToast();
   const router = useRouter();
@@ -98,6 +135,20 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
   );
   const [jobId, setJobId] = React.useState<string | undefined>(undefined);
   const hasProcessedResult = React.useRef(true);
+  const [isResolvingProviders, startProviderResolveTransition] =
+    React.useTransition();
+  const [providerDialogOpen, setProviderDialogOpen] = React.useState(false);
+  const [providerDialogRepo, setProviderDialogRepo] = React.useState<
+    string | null
+  >(null);
+  const [providerDialogCandidates, setProviderDialogCandidates] =
+    React.useState<ProviderChoiceCandidate[]>([]);
+  const [providerDialogPendingState, setProviderDialogPendingState] =
+    React.useState<{
+      lines: string[];
+      nextIndex: number;
+      resolvedLines: string[];
+    } | null>(null);
 
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -110,8 +161,13 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
   const [importStats, setImportStats] = React.useState<{
     newCount: number;
     existingCount: number;
+    skippedImages?: number;
   } | null>(null);
   const [fileInputKey, setFileInputKey] = React.useState(Date.now());
+  const currentRepositoryIds = React.useMemo(
+    () => new Set(currentRepositories.map((repo) => repo.id)),
+    [currentRepositories],
+  );
 
   React.useEffect(() => {
     if (isPending) {
@@ -270,9 +326,117 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
     return () => clearInterval(intervalId);
   }, [pkgJobId, router]);
 
+  const submitResolvedLines = React.useCallback(
+    (lines: string[]) => {
+      const fd = new FormData();
+      fd.set("urls", lines.join("\n"));
+      formAction(fd);
+    },
+    [formAction],
+  );
+
+  const resolveLinesAndSubmit = React.useCallback(
+    async (lines: string[], startIndex = 0, seedResolved: string[] = []) => {
+      const resolved: string[] = [...seedResolved];
+
+      for (let i = startIndex; i < lines.length; i += 1) {
+        const raw = lines[i]?.trim() ?? "";
+        if (!raw) continue;
+
+        if (isHttpUrl(raw)) {
+          resolved.push(raw);
+          continue;
+        }
+
+        if (!isOwnerRepoShorthand(raw)) {
+          resolved.push(raw);
+          continue;
+        }
+
+        const result = await resolveRepoProvidersAction(raw);
+        const candidates = result.candidates.map((c) => ({
+          provider: c.provider,
+          providerHost: c.providerHost,
+          canonicalRepoUrl: c.canonicalRepoUrl,
+        }));
+
+        if (candidates.length === 1) {
+          resolved.push(candidates[0].canonicalRepoUrl);
+          continue;
+        }
+
+        if (candidates.length > 1) {
+          setProviderDialogRepo(raw);
+          setProviderDialogCandidates(candidates);
+          setProviderDialogPendingState({
+            lines,
+            nextIndex: i + 1,
+            resolvedLines: resolved,
+          });
+          setProviderDialogOpen(true);
+          return;
+        }
+
+        resolved.push(raw);
+      }
+
+      submitResolvedLines(resolved);
+    },
+    [submitResolvedLines],
+  );
+
+  const handleChooseProvider = (candidateUrl: string) => {
+    const pending = providerDialogPendingState;
+    if (!pending) return;
+
+    setProviderDialogOpen(false);
+    setProviderDialogRepo(null);
+    setProviderDialogCandidates([]);
+    setProviderDialogPendingState(null);
+
+    hasProcessedResult.current = false;
+    startProviderResolveTransition(async () => {
+      await resolveLinesAndSubmit(pending.lines, pending.nextIndex, [
+        ...pending.resolvedLines,
+        candidateUrl,
+      ]);
+    });
+  };
+
+  const orderedProviderCandidates = React.useMemo(() => {
+    const order: Record<ProviderChoiceCandidate["provider"], number> = {
+      github: 0,
+      gitlab: 1,
+      codeberg: 2,
+    };
+    return [...providerDialogCandidates].sort(
+      (a, b) =>
+        order[a.provider] - order[b.provider] ||
+        (a.providerHost ?? "").localeCompare(b.providerHost ?? ""),
+    );
+  }, [providerDialogCandidates]);
+
   const handleImportClick = () => {
     fileInputRef.current?.click();
   };
+
+  const prepareImportPreview = React.useCallback(
+    (importedData: Repository[], skippedImages?: number) => {
+      const newRepos = importedData.filter(
+        (repo) => !currentRepositoryIds.has(repo.id),
+      );
+      const existingCount = importedData.length - newRepos.length;
+
+      setReposToImport(importedData);
+      setImportStats({
+        newCount: newRepos.length,
+        existingCount,
+        skippedImages,
+      });
+      setIsDialogVisible(true);
+    },
+    [currentRepositoryIds],
+  );
 
   const handleFileChange = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -284,6 +448,52 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
     reader.onload = async (e) => {
       try {
         const content = e.target?.result as string;
+
+        if (isComposeFileName(file.name)) {
+          startImportTransition(async () => {
+            try {
+              const result = await previewComposeImportAction(
+                file.name,
+                content,
+              );
+              if (!result.success) {
+                toast({
+                  title: t("toast_import_error_title"),
+                  description:
+                    result.error ?? t("toast_import_error_description"),
+                  variant: "destructive",
+                });
+                return;
+              }
+
+              const skippedImages = Object.values(result.skipped).reduce(
+                (sum, count) => sum + count,
+                0,
+              );
+              if (result.repositories.length === 0 && skippedImages === 0) {
+                toast({
+                  title: t("toast_import_error_title"),
+                  description: t("toast_import_error_no_compose_images"),
+                  variant: "destructive",
+                });
+                return;
+              }
+
+              prepareImportPreview(result.repositories, skippedImages);
+            } catch (error: unknown) {
+              if (reloadIfServerActionStale(error)) {
+                return;
+              }
+              toast({
+                title: t("toast_import_error_title"),
+                description: t("toast_import_error_description"),
+                variant: "destructive",
+              });
+            }
+          });
+          return;
+        }
+
         const importedData = JSON.parse(content);
 
         if (Array.isArray(importedData)) {
@@ -299,17 +509,7 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
             throw new Error(t("toast_import_error_invalid_format"));
           }
 
-          const existingIds = new Set(
-            currentRepositories.map((repo) => repo.id),
-          );
-          const newRepos = importedData.filter(
-            (repo) => !existingIds.has(repo.id),
-          );
-          const existingCount = importedData.length - newRepos.length;
-
-          setReposToImport(importedData);
-          setImportStats({ newCount: newRepos.length, existingCount });
-          setIsDialogVisible(true);
+          prepareImportPreview(importedData);
         } else {
           toast({
             title: t("toast_import_error_title"),
@@ -385,162 +585,322 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
     <>
       <Card>
         <CardHeader>
-          <div className="flex items-center gap-2 mb-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab("releases")}
-              className={cn(
-                "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
-                activeTab === "releases"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted",
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle>
+              {activeTab === "releases" ? t("title") : tp("title")}
+            </CardTitle>
+            <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
+              <input
+                key={fileInputKey}
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept=".json,.yml,.yaml"
+                className="hidden"
+              />
+              <input
+                key={`json-${fileInputKey}`}
+                type="file"
+                onChange={handleFileChange}
+                accept=".json"
+                className="hidden"
+              />
+              {!isExpanded && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleImportClick}
+                  className="min-w-0 flex-1 sm:flex-none"
+                  disabled={isPending || isImporting || !!jobId || !isOnline}
+                >
+                  {isImporting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Upload className="mr-2 h-4 w-4" />
+                  )}
+                  {t("button_import")}
+                </Button>
               )}
-            >
-              {tp("tab_releases")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("packages")}
-              className={cn(
-                "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
-                activeTab === "packages"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted",
-              )}
-            >
-              {tp("tab_packages")}
-            </button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={onToggleExpanded}
+                disabled={isExpansionSaving}
+                aria-expanded={isExpanded}
+                aria-controls={contentId}
+                aria-label={
+                  isExpanded
+                    ? t("collapse_button_aria")
+                    : t("expand_button_aria")
+                }
+              >
+                <ChevronDown
+                  className={cn(
+                    "size-5 transition-transform duration-200 ease-out",
+                    isExpanded ? "rotate-0" : "rotate-90",
+                  )}
+                />
+              </Button>
+            </div>
           </div>
-          <CardTitle>
-            {activeTab === "releases" ? t("title") : tp("title")}
-          </CardTitle>
-          <CardDescription>
-            {activeTab === "releases" ? t("description") : tp("description")}
-          </CardDescription>
         </CardHeader>
-        <CardContent>
-          {activeTab === "releases" ? (
-            <form
-              action={formAction}
-              onSubmit={(e) => {
-                if (typeof navigator !== "undefined" && !navigator.onLine) {
-                  e.preventDefault();
-                  toast({
-                    title: t("toast_fail_title"),
-                    description: t("toast_generic_error"),
-                    variant: "destructive",
-                  });
-                }
-              }}
-            >
-              <div className="grid w-full gap-2">
-                <Textarea
-                  ref={textareaRef}
-                  name="urls"
-                  placeholder={t("placeholder")}
-                  value={urls}
-                  onChange={(e) => setUrls(e.target.value)}
-                  rows={4}
-                  wrap="off"
-                  className="resize-none overflow-y-auto overflow-x-auto max-h-80"
-                  disabled={isPending || !!jobId}
-                />
-                <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:gap-2">
-                  <input
-                    key={fileInputKey}
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileChange}
-                    accept=".json"
-                    className="hidden"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handleImportClick}
-                    className="mt-2 w-full sm:mt-0 sm:w-auto"
-                    disabled={isPending || isImporting || !!jobId || !isOnline}
-                  >
-                    {isImporting ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Upload className="mr-2 h-4 w-4" />
-                    )}
-                    {t("button_import")}
-                  </Button>
-                  <SubmitButton
-                    isDisabled={!urls.trim() || !isOnline}
-                    isPending={isPending || !!jobId}
-                  />
-                </div>
-              </div>
-            </form>
-          ) : (
-            <form
-              action={pkgFormAction}
-              onSubmit={(e) => {
-                if (typeof navigator !== "undefined" && !navigator.onLine) {
-                  e.preventDefault();
-                  toast({
-                    title: tp("toast_generic_error"),
-                    description: tp("toast_generic_error"),
-                    variant: "destructive",
-                  });
-                }
-              }}
-            >
-              <div className="grid w-full gap-3">
-                <Textarea
-                  name="urls"
-                  placeholder={tp("placeholder")}
-                  value={packageUrls}
-                  onChange={(e) => setPackageUrls(e.target.value)}
-                  rows={3}
-                  wrap="off"
-                  className="resize-none overflow-y-auto overflow-x-auto max-h-60"
-                  disabled={isPkgPending || !!pkgJobId}
-                />
-                <div>
-                  <label
-                    htmlFor="pkg-tags"
-                    className="text-sm font-medium mb-1 block"
-                  >
-                    {tp("tags_label")}
-                  </label>
-                  <Input
-                    id="pkg-tags"
-                    name="tags"
-                    placeholder={tp("tags_placeholder")}
-                    value={packageTags}
-                    onChange={(e) => setPackageTags(e.target.value)}
-                    disabled={isPkgPending || !!pkgJobId}
-                  />
-                </div>
-                <div className="flex justify-end">
-                  <Button
-                    type="submit"
-                    disabled={
-                      !packageUrls.trim() ||
-                      !packageTags.trim() ||
-                      isPkgPending ||
-                      !!pkgJobId ||
-                      !isOnline
-                    }
-                  >
-                    {isPkgPending || !!pkgJobId ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : null}
-                    {tp("button_add")}
-                  </Button>
-                </div>
-              </div>
-            </form>
+        <div
+          id={contentId}
+          aria-hidden={!isExpanded}
+          className={cn(
+            "grid transition-[grid-template-rows,opacity] duration-300 ease-in-out",
+            isExpanded
+              ? "grid-rows-[1fr] opacity-100"
+              : "grid-rows-[0fr] opacity-0",
           )}
-        </CardContent>
+        >
+          <div className="min-h-0 overflow-hidden">
+            <CardContent className="pt-0">
+              <div className="flex items-center gap-2 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("releases")}
+                  className={cn(
+                    "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
+                    activeTab === "releases"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                  )}
+                >
+                  {tp("tab_releases")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("packages")}
+                  className={cn(
+                    "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
+                    activeTab === "packages"
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                  )}
+                >
+                  {tp("tab_packages")}
+                </button>
+              </div>
+              <CardDescription className="mb-6">
+                {activeTab === "releases"
+                  ? t("description")
+                  : tp("description")}
+              </CardDescription>
+              {activeTab === "releases" ? (
+                <form
+                  onSubmit={(e) => {
+                    if (
+                      typeof navigator !== "undefined" &&
+                      !navigator.onLine
+                    ) {
+                      e.preventDefault();
+                      toast({
+                        title: t("toast_fail_title"),
+                        description: t("toast_generic_error"),
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+
+                    e.preventDefault();
+                    if (!urls.trim()) return;
+                    if (
+                      isPending ||
+                      isResolvingProviders ||
+                      providerDialogOpen
+                    ) {
+                      return;
+                    }
+                    if (jobId) return;
+
+                    hasProcessedResult.current = false;
+                    const lines = urls
+                      .split("\n")
+                      .map((u) => u.trim())
+                      .filter((u) => u !== "");
+
+                    startProviderResolveTransition(async () => {
+                      await resolveLinesAndSubmit(lines);
+                    });
+                  }}
+                >
+                  <div className="grid w-full gap-2">
+                    <Textarea
+                      ref={textareaRef}
+                      name="urls"
+                      placeholder={t("placeholder")}
+                      value={urls}
+                      onChange={(e) => setUrls(e.target.value)}
+                      rows={4}
+                      wrap="off"
+                      className="resize-none overflow-y-auto overflow-x-auto max-h-80"
+                      disabled={
+                        !isExpanded ||
+                        isPending ||
+                        isResolvingProviders ||
+                        !!jobId ||
+                        providerDialogOpen
+                      }
+                    />
+                    <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={handleImportClick}
+                        className="mt-2 w-full sm:mt-0 sm:w-auto"
+                        disabled={
+                          !isExpanded ||
+                          isPending ||
+                          isImporting ||
+                          !!jobId ||
+                          !isOnline
+                        }
+                      >
+                        {isImporting ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Upload className="mr-2 h-4 w-4" />
+                        )}
+                        {t("button_import")}
+                      </Button>
+                      <SubmitButton
+                        isDisabled={
+                          !isExpanded ||
+                          !urls.trim() ||
+                          !isOnline ||
+                          isResolvingProviders ||
+                          providerDialogOpen
+                        }
+                        isPending={
+                          isPending || !!jobId || isResolvingProviders
+                        }
+                      />
+                    </div>
+                  </div>
+                </form>
+              ) : (
+                <form
+                  action={pkgFormAction}
+                  onSubmit={(e) => {
+                    if (
+                      typeof navigator !== "undefined" &&
+                      !navigator.onLine
+                    ) {
+                      e.preventDefault();
+                      toast({
+                        title: tp("toast_generic_error"),
+                        description: tp("toast_generic_error"),
+                        variant: "destructive",
+                      });
+                    }
+                  }}
+                >
+                  <div className="grid w-full gap-3">
+                    <Textarea
+                      name="urls"
+                      placeholder={tp("placeholder")}
+                      value={packageUrls}
+                      onChange={(e) => setPackageUrls(e.target.value)}
+                      rows={3}
+                      wrap="off"
+                      className="resize-none overflow-y-auto overflow-x-auto max-h-60"
+                      disabled={!isExpanded || isPkgPending || !!pkgJobId}
+                    />
+                    <div>
+                      <label
+                        htmlFor="pkg-tags"
+                        className="text-sm font-medium mb-1 block"
+                      >
+                        {tp("tags_label")}
+                      </label>
+                      <Input
+                        id="pkg-tags"
+                        name="tags"
+                        placeholder={tp("tags_placeholder")}
+                        value={packageTags}
+                        onChange={(e) => setPackageTags(e.target.value)}
+                        disabled={!isExpanded || isPkgPending || !!pkgJobId}
+                      />
+                    </div>
+                    <div className="flex justify-end">
+                      <Button
+                        type="submit"
+                        disabled={
+                          !isExpanded ||
+                          !packageUrls.trim() ||
+                          !packageTags.trim() ||
+                          isPkgPending ||
+                          !!pkgJobId ||
+                          !isOnline
+                        }
+                      >
+                        {isPkgPending || !!pkgJobId ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : null}
+                        {tp("button_add")}
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+              )}
+            </CardContent>
+          </div>
+        </div>
       </Card>
 
-      <AlertDialog open={isDialogVisible} onOpenChange={setIsDialogVisible}>
+      <AlertDialog
+        open={providerDialogOpen}
+        onOpenChange={(open) => {
+          setProviderDialogOpen(open);
+          if (!open) {
+            setProviderDialogRepo(null);
+            setProviderDialogCandidates([]);
+            setProviderDialogPendingState(null);
+          }
+        }}
+      >
         <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("provider_select_title")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {providerDialogRepo
+                ? t("provider_select_description", { repo: providerDialogRepo })
+                : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between sm:space-x-0">
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-start">
+              {orderedProviderCandidates.map((candidate) => (
+                <AlertDialogAction
+                  key={`${candidate.provider}-${candidate.canonicalRepoUrl}`}
+                  onClick={() =>
+                    handleChooseProvider(candidate.canonicalRepoUrl)
+                  }
+                  disabled={isResolvingProviders || isPending}
+                >
+                  {candidate.provider === "codeberg"
+                    ? t("provider_select_codeberg")
+                    : candidate.provider === "gitlab"
+                      ? `${t("provider_select_gitlab")}${
+                          candidate.providerHost
+                            ? ` (${candidate.providerHost})`
+                            : ""
+                        }`
+                      : t("provider_select_github")}
+                </AlertDialogAction>
+              ))}
+            </div>
+            <AlertDialogCancel disabled={isResolvingProviders || isPending}>
+              {t("cancel_button")}
+            </AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={isDialogVisible} onOpenChange={setIsDialogVisible}>
+        <AlertDialogContent className="max-w-2xl">
           <AlertDialogHeader>
             <AlertDialogTitle>{t("import_dialog_title")}</AlertDialogTitle>
             <AlertDialogDescription>
@@ -549,8 +909,59 @@ export function RepositoryForm({ currentRepositories }: RepositoryFormProps) {
                   newCount: importStats.newCount,
                   existingCount: importStats.existingCount,
                 })}
+              {importStats?.skippedImages ? (
+                <span className="mt-2 block">
+                  {t("import_dialog_compose_skipped", {
+                    count: importStats.skippedImages,
+                  })}
+                </span>
+              ) : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {reposToImport?.length ? (
+            <div className="max-h-72 overflow-y-auto rounded-md border">
+              <div className="sticky top-0 border-b bg-background px-3 py-2 text-sm font-medium">
+                {t("import_dialog_repo_list_title")}
+              </div>
+              <ul className="divide-y">
+                {reposToImport.map((repo) => {
+                  const isExisting = currentRepositoryIds.has(repo.id);
+                  const providerName = getRepositoryProviderName(repo);
+
+                  return (
+                    <li
+                      key={repo.id}
+                      className="flex min-h-12 items-center justify-between gap-3 px-3 py-2"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        {providerName ? (
+                          <Badge variant="outline" className="shrink-0">
+                            {providerName}
+                          </Badge>
+                        ) : null}
+                        <a
+                          href={repo.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="min-w-0 truncate text-sm font-medium text-foreground hover:underline"
+                        >
+                          {getRepositoryDisplayName(repo)}
+                        </a>
+                      </div>
+                      <Badge
+                        variant={isExisting ? "secondary" : "default"}
+                        className="shrink-0"
+                      >
+                        {isExisting
+                          ? t("import_dialog_repo_status_existing")
+                          : t("import_dialog_repo_status_new")}
+                      </Badge>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isImporting}>
               {t("cancel_button")}

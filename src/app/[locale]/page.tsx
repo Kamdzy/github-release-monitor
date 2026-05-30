@@ -4,9 +4,10 @@ import { AutoRefresher } from "@/components/auto-refresher";
 import { BackToTopButton } from "@/components/back-to-top-button";
 import { Header } from "@/components/header";
 import { HomePageClient } from "@/components/home-page-client";
+import { getCurrentAuthAccess } from "@/lib/auth/access";
 import { logger } from "@/lib/logger";
-import { getRepositories } from "@/lib/repository-storage";
-import { getSettings } from "@/lib/settings-storage";
+import { getRepositories } from "@/lib/storage/repositories";
+import { getSettings } from "@/lib/storage/settings";
 import type {
   AppSettings,
   EnrichedRelease,
@@ -34,6 +35,7 @@ export default async function HomePage({
     number
   > | null = null;
   const updateNotice = await getUpdateNotificationState();
+  const authAccess = await getCurrentAuthAccess();
 
   try {
     settings = await getSettings();
@@ -76,6 +78,9 @@ export default async function HomePage({
             releaseChannels: repo.releaseChannels,
             preReleaseSubChannels: repo.preReleaseSubChannels,
             releasesPerPage: repo.releasesPerPage,
+            refreshInterval: repo.refreshInterval,
+            cacheInterval: repo.cacheInterval,
+            backgroundCheckCron: repo.backgroundCheckCron,
             includeRegex: repo.includeRegex,
             excludeRegex: repo.excludeRegex,
             appriseTags: repo.appriseTags,
@@ -96,6 +101,9 @@ export default async function HomePage({
       refreshInterval: 10,
       cacheInterval: 5,
       releaseChannels: ["stable"],
+      releaseSortOrder: "latest_first",
+      providerSortOrder: ["github", "gitlab", "codeberg"],
+      prioritizeNewSecurityReleases: false,
       showAcknowledge: true,
       releasesPerPage: 30,
       parallelRepoFetches: 1,
@@ -105,8 +113,14 @@ export default async function HomePage({
 
   return (
     <div className="min-h-screen w-full">
-      <AutoRefresher intervalMinutes={settings.refreshInterval} />
-      <Header locale={locale} updateNotice={updateNotice} />
+      {authAccess.canMutate && (
+        <AutoRefresher intervalMinutes={settings.refreshInterval} />
+      )}
+      <Header
+        locale={locale}
+        updateNotice={updateNotice}
+        authAccess={authAccess}
+      />
       <main className="container mx-auto px-4 py-8 md:px-6">
         <HomePageClient
           repositories={repositories}
@@ -117,6 +131,7 @@ export default async function HomePage({
           errorSummary={errorSummary}
           lastUpdated={lastUpdated}
           locale={locale}
+          canMutate={authAccess.canMutate}
         />
       </main>
       <BackToTopButton />

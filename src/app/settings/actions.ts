@@ -4,21 +4,55 @@ import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { getLocale, getTranslations } from "next-intl/server";
 
-import { checkForNewReleases } from "@/app/actions";
+import { canPerformRestrictedAction } from "@/lib/auth/access";
 import { logger } from "@/lib/logger";
-import { getRepositories, saveRepositories } from "@/lib/repository-storage";
+import {
+  normalizeProviderSortOrder,
+  normalizeReleaseSortOrder,
+} from "@/lib/release-sort";
+import { checkForNewReleases } from "@/lib/releases/checker";
+import { normalizeBackgroundCheckCron } from "@/lib/runtime/repository-schedule";
+import { scheduleTask } from "@/lib/runtime/task-scheduler";
 import {
   NEXT_LOCALE_COOKIE,
   nextLocaleCookieOptions,
   SETTINGS_LOCALE_COOKIE,
   settingsLocaleCookieOptions,
 } from "@/lib/settings-locale-cookie";
-import { getSettings, saveSettings } from "@/lib/settings-storage";
-import { scheduleTask } from "@/lib/task-scheduler";
+import { getRepositories, saveRepositories } from "@/lib/storage/repositories";
+import { getSettings, saveSettings } from "@/lib/storage/settings";
 import type { AppSettings } from "@/types";
+
+async function getRestrictedActionMessage() {
+  const locale = await getLocale();
+  const t = await getTranslations({ locale, namespace: "Actions" });
+  return t("error_auth_required");
+}
+
+async function isRestrictedActionAllowed(): Promise<boolean> {
+  const allowed = await canPerformRestrictedAction();
+  if (!allowed) {
+    logger
+      .withScope("Settings")
+      .warn(
+        "Rejected restricted settings action because the request is unauthenticated.",
+      );
+  }
+  return allowed;
+}
 
 export async function updateSettingsAction(newSettings: AppSettings) {
   return scheduleTask("updateSettingsAction", async () => {
+    if (!(await isRestrictedActionAllowed())) {
+      return {
+        success: false,
+        message: {
+          title: await getRestrictedActionMessage(),
+          description: await getRestrictedActionMessage(),
+        },
+      };
+    }
+
     try {
       const currentSettings = await getSettings();
 
@@ -63,6 +97,24 @@ export async function updateSettingsAction(newSettings: AppSettings) {
         JSON.stringify(normArray(newSettings.preReleaseSubChannels));
       const rppChanged =
         currentSettings.releasesPerPage !== newSettings.releasesPerPage;
+      const incomingCron = (newSettings.backgroundCheckCron ?? "").trim();
+      const sanitizedBackgroundCheckCron = incomingCron
+        ? normalizeBackgroundCheckCron(incomingCron)
+        : undefined;
+
+      if (incomingCron && !sanitizedBackgroundCheckCron) {
+        const t = await getTranslations({
+          locale: newSettings.locale,
+          namespace: "SettingsForm",
+        });
+        return {
+          success: false,
+          message: {
+            title: t("toast_error_title"),
+            description: t("cron_error_invalid"),
+          },
+        };
+      }
 
       // Ensure refreshInterval is at least 1
       const sanitizedParallelRepoFetches = (() => {
@@ -80,10 +132,17 @@ export async function updateSettingsAction(newSettings: AppSettings) {
         ...newSettings,
         refreshInterval: Math.max(1, newSettings.refreshInterval),
         cacheInterval: Math.max(0, newSettings.cacheInterval),
+        backgroundCheckCron: sanitizedBackgroundCheckCron,
         parallelRepoFetches: sanitizedParallelRepoFetches,
         includeRegex: newSettings.includeRegex?.trim() || undefined,
         excludeRegex: newSettings.excludeRegex?.trim() || undefined,
         appriseTags: newSettings.appriseTags?.trim() || undefined,
+        releaseSortOrder: normalizeReleaseSortOrder(
+          newSettings.releaseSortOrder,
+        ),
+        providerSortOrder: normalizeProviderSortOrder(
+          newSettings.providerSortOrder,
+        ),
       };
 
       // Compute a concise diff of global settings
@@ -125,6 +184,11 @@ export async function updateSettingsAction(newSettings: AppSettings) {
       );
       pushValueChange("cacheInterval", oldS.cacheInterval, newS.cacheInterval);
       pushValueChange(
+        "backgroundCheckCron",
+        oldS.backgroundCheckCron,
+        newS.backgroundCheckCron,
+      );
+      pushValueChange(
         "releasesPerPage",
         oldS.releasesPerPage,
         newS.releasesPerPage,
@@ -145,11 +209,41 @@ export async function updateSettingsAction(newSettings: AppSettings) {
         newS.preReleaseSubChannels,
       );
       pushValueChange(
+        "releaseSortOrder",
+        oldS.releaseSortOrder,
+        newS.releaseSortOrder,
+      );
+      pushArrayChange(
+        "providerSortOrder",
+        oldS.providerSortOrder,
+        newS.providerSortOrder,
+      );
+      pushValueChange(
+        "prioritizeNewSecurityReleases",
+        oldS.prioritizeNewSecurityReleases,
+        newS.prioritizeNewSecurityReleases,
+      );
+      pushValueChange(
         "showAcknowledge",
         oldS.showAcknowledge,
         newS.showAcknowledge,
       );
       pushValueChange("showMarkAsNew", oldS.showMarkAsNew, newS.showMarkAsNew);
+      pushValueChange(
+        "showProviderPrefixInRepoId",
+        oldS.showProviderPrefixInRepoId,
+        newS.showProviderPrefixInRepoId,
+      );
+      pushValueChange(
+        "showProviderDomainInRepoId",
+        oldS.showProviderDomainInRepoId,
+        newS.showProviderDomainInRepoId,
+      );
+      pushValueChange(
+        "repositoryFormExpanded",
+        oldS.repositoryFormExpanded,
+        newS.repositoryFormExpanded,
+      );
       pushValueChange("includeRegex", oldS.includeRegex, newS.includeRegex);
       pushValueChange("excludeRegex", oldS.excludeRegex, newS.excludeRegex);
       pushValueChange(
@@ -246,6 +340,16 @@ export async function updateSettingsAction(newSettings: AppSettings) {
 
 export async function deleteAllRepositoriesAction() {
   return scheduleTask("deleteAllRepositoriesAction", async () => {
+    if (!(await isRestrictedActionAllowed())) {
+      return {
+        success: false,
+        message: {
+          title: await getRestrictedActionMessage(),
+          description: await getRestrictedActionMessage(),
+        },
+      };
+    }
+
     try {
       await saveRepositories([]);
       logger.withScope("Settings").info("Deleted all repositories.");

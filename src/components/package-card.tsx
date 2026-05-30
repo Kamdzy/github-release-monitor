@@ -87,9 +87,10 @@ function truncateDigest(digest: string, length = 12): string {
 interface PackageCardProps {
   enrichedRelease: EnrichedRelease;
   settings: AppSettings;
+  canMutate?: boolean;
 }
 
-export function PackageCard({ enrichedRelease, settings }: PackageCardProps) {
+export function PackageCard({ enrichedRelease, settings, canMutate = true }: PackageCardProps) {
   const t = useTranslations("PackageCard");
   const tActions = useTranslations("Actions");
   const locale = useLocale();
