@@ -1,10 +1,8 @@
 import crypto from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { getLocale, getTranslations } from "next-intl/server";
-import {
-  getLatestDigestsForPackages,
-  isValidItemId,
-} from "@/lib/packages/package-actions";
+import { getLatestDigestsForPackages } from "@/lib/packages/package-actions";
+import { isValidItemId } from "@/lib/packages/validation";
 import { getLatestReleasesForRepos } from "@/lib/releases";
 import {
   applyEtagUpdate,
