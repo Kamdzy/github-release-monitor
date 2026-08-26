@@ -90,7 +90,11 @@ interface PackageCardProps {
   canMutate?: boolean;
 }
 
-export function PackageCard({ enrichedRelease, settings, canMutate = true }: PackageCardProps) {
+export function PackageCard({
+  enrichedRelease,
+  settings,
+  canMutate = true,
+}: PackageCardProps) {
   const t = useTranslations("PackageCard");
   const tActions = useTranslations("Actions");
   const locale = useLocale();

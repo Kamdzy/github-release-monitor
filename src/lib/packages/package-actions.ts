@@ -3,25 +3,22 @@
 import crypto from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { getTranslations } from "next-intl/server";
-import { logger } from "@/lib/logger";
 import { sendPackageNotification } from "@/lib/notifications";
-import {
-  isValidItemId,
-  parseGhcrPackageUrl,
-} from "@/lib/packages/validation";
+import { isValidItemId, parseGhcrPackageUrl } from "@/lib/packages/validation";
 import { fetchJsonResponseWithRetry } from "@/lib/releases/fetch";
 import { resolveParallelRepoFetches } from "@/lib/releases/filters";
 import { refreshMultipleRepositoriesAction } from "@/lib/repositories/repository-actions-service";
+import { scheduleTask } from "@/lib/runtime/task-scheduler";
 import { log } from "@/lib/server-action-helpers";
-import { getJobStatus, setJobStatus } from "@/lib/storage/jobs";
+import { setJobStatus } from "@/lib/storage/jobs";
 import { getRepositories, saveRepositories } from "@/lib/storage/repositories";
 import { getSettings } from "@/lib/storage/settings";
-import { scheduleTask } from "@/lib/runtime/task-scheduler";
 import type {
   AppriseFormat,
   AppSettings,
   EnrichedRelease,
   FetchError,
+  Locale,
   Repository,
   TagDigest,
 } from "@/types";
@@ -448,7 +445,7 @@ export async function processPackageChange(
   enrichedPkg: EnrichedRelease,
   repo: Repository,
   settings: AppSettings,
-  effectiveLocale: string,
+  effectiveLocale: Locale,
 ): Promise<{ changed: boolean; notificationSent: boolean }> {
   if (enrichedPkg.error) {
     log.warn(

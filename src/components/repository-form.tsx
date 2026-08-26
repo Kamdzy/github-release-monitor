@@ -1,19 +1,13 @@
 "use client";
 
-import { ChevronDown, Loader2, Plus, Upload } from "lucide-react";
+import { ChevronDown, Loader2, Plus, Upload, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import * as React from "react";
 import { useActionState } from "react";
 
-import {
-  addPackagesAction,
-  addRepositoriesAction,
-  getJobStatusAction,
-  importRepositoriesAction,
-  previewComposeImportAction,
-  resolveRepoProvidersAction,
-} from "@/app/actions";
+import { addRepositoriesAction } from "@/app/actions";
+import { RepositoryTagPicker } from "@/components/repository-tag-picker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,7 +20,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Card,
   CardContent,
@@ -35,11 +28,25 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import { useJobPolling } from "@/hooks/use-job-polling";
 import { useNetworkStatus } from "@/hooks/use-network";
 import { useToast } from "@/hooks/use-toast";
-import { reloadIfServerActionStale } from "@/lib/server-action-error";
+import { isolateLtrText } from "@/lib/bidi";
+import {
+  MAX_REPOSITORY_TAGS,
+  normalizeRepositoryTags,
+} from "@/lib/repositories/tags";
 import { cn } from "@/lib/utils";
 import type { Repository } from "@/types";
+import {
+  getRepositoryDisplayName,
+  getRepositoryProviderName,
+  initialRepositoryFormState,
+} from "./repository-form-helpers";
+import {
+  useRepositoryImportWorkflow,
+  useRepositoryProviderWorkflow,
+} from "./repository-form-workflows";
 
 function SubmitButton({
   isDisabled,
@@ -52,53 +59,24 @@ function SubmitButton({
 
   return (
     <Button
+      data-testid="add-repositories"
       type="submit"
       className="w-full sm:w-auto"
       disabled={isPending || isDisabled}
     >
       {isPending ? (
-        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        <Loader2 className="me-2 h-4 w-4 animate-spin" />
       ) : (
-        <Plus className="mr-2 h-4 w-4" />
+        <Plus className="me-2 h-4 w-4" />
       )}
       {t("button_add")}
     </Button>
   );
 }
 
-const initialState = {
-  success: false,
-  toast: undefined,
-  error: undefined,
-};
-
-const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim());
-const isOwnerRepoShorthand = (value: string) =>
-  /^[a-z0-9-._]+\/[a-z0-9-._]+$/i.test(value.trim());
-const isComposeFileName = (value: string) => /\.(ya?ml)$/i.test(value);
-
-const getRepositoryDisplayName = (repo: Repository) => {
-  if (repo.id.startsWith("github:")) return repo.id.slice("github:".length);
-  if (repo.id.startsWith("codeberg:")) return repo.id.slice("codeberg:".length);
-  if (repo.id.startsWith("gitlab:")) return repo.id.slice("gitlab:".length);
-  return repo.id;
-};
-
-const getRepositoryProviderName = (repo: Repository) => {
-  if (repo.id.startsWith("github:")) return "GitHub";
-  if (repo.id.startsWith("codeberg:")) return "Codeberg";
-  if (repo.id.startsWith("gitlab:")) return "GitLab";
-  return null;
-};
-
-type ProviderChoiceCandidate = {
-  provider: "github" | "codeberg" | "gitlab";
-  providerHost?: string;
-  canonicalRepoUrl: string;
-};
-
 interface RepositoryFormProps {
   currentRepositories: Repository[];
+  availableTags: string[];
   isExpanded: boolean;
   isExpansionSaving: boolean;
   onToggleExpanded: () => void;
@@ -106,68 +84,44 @@ interface RepositoryFormProps {
 
 export function RepositoryForm({
   currentRepositories,
+  availableTags,
   isExpanded,
   isExpansionSaving,
   onToggleExpanded,
 }: RepositoryFormProps) {
   const t = useTranslations("RepositoryForm");
-  const tp = useTranslations("PackageForm");
   const contentId = React.useId();
+  const tagsInputId = React.useId();
   const [urls, setUrls] = React.useState("");
+  const [selectedTags, setSelectedTags] = React.useState<string[]>([]);
+  const [tagInput, setTagInput] = React.useState("");
+  const [tagError, setTagError] = React.useState(false);
   const { toast } = useToast();
   const router = useRouter();
   const { isOnline } = useNetworkStatus();
-  const [activeTab, setActiveTab] = React.useState<"releases" | "packages">(
-    "releases",
-  );
-  const [packageUrls, setPackageUrls] = React.useState("");
-  const [packageTags, setPackageTags] = React.useState("");
-  const [pkgState, pkgFormAction, isPkgPending] = useActionState(
-    addPackagesAction,
-    initialState,
-  );
-  const [pkgJobId, setPkgJobId] = React.useState<string | undefined>(undefined);
-  const hasPkgProcessedResult = React.useRef(true);
 
   const [state, formAction, isPending] = useActionState(
     addRepositoriesAction,
-    initialState,
+    initialRepositoryFormState,
   );
   const [jobId, setJobId] = React.useState<string | undefined>(undefined);
   const hasProcessedResult = React.useRef(true);
-  const [isResolvingProviders, startProviderResolveTransition] =
-    React.useTransition();
-  const [providerDialogOpen, setProviderDialogOpen] = React.useState(false);
-  const [providerDialogRepo, setProviderDialogRepo] = React.useState<
-    string | null
-  >(null);
-  const [providerDialogCandidates, setProviderDialogCandidates] =
-    React.useState<ProviderChoiceCandidate[]>([]);
-  const [providerDialogPendingState, setProviderDialogPendingState] =
-    React.useState<{
-      lines: string[];
-      nextIndex: number;
-      resolvedLines: string[];
-    } | null>(null);
-
+  const providerWorkflow = useRepositoryProviderWorkflow(
+    formAction,
+    hasProcessedResult,
+    selectedTags,
+  );
+  const importWorkflow = useRepositoryImportWorkflow({
+    currentRepositories,
+    onJobStarted: setJobId,
+    onImportSuccess: () => {
+      setSelectedTags([]);
+      setTagInput("");
+      setTagError(false);
+    },
+    selectedTags,
+  });
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
-
-  const [isImporting, startImportTransition] = React.useTransition();
-  const [isDialogVisible, setIsDialogVisible] = React.useState(false);
-  const [reposToImport, setReposToImport] = React.useState<Repository[] | null>(
-    null,
-  );
-  const [importStats, setImportStats] = React.useState<{
-    newCount: number;
-    existingCount: number;
-    skippedImages?: number;
-  } | null>(null);
-  const [fileInputKey, setFileInputKey] = React.useState(Date.now());
-  const currentRepositoryIds = React.useMemo(
-    () => new Set(currentRepositories.map((repo) => repo.id)),
-    [currentRepositories],
-  );
 
   React.useEffect(() => {
     if (isPending) {
@@ -193,68 +147,73 @@ export function RepositoryForm({
     if (state.success && !hasProcessedResult.current) {
       hasProcessedResult.current = true;
       setUrls("");
+      setSelectedTags([]);
+      setTagInput("");
+      setTagError(false);
       if (state.jobId) {
         setJobId(state.jobId);
       }
     }
   }, [state, t, toast]);
 
-  React.useEffect(() => {
-    if (!jobId) return;
+  const addSelectedTag = (tag: string) => {
+    const result = normalizeRepositoryTags([...selectedTags, tag]);
+    if (!result.success) {
+      setTagError(true);
+      return false;
+    }
 
-    const POLLING_INTERVAL = 2000; // 2 seconds
-    const POLLING_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+    setSelectedTags(result.tags);
+    setTagError(false);
+    return true;
+  };
 
-    const startTime = Date.now();
+  const commitTagInput = () => {
+    if (!tagInput.trim()) return;
+    if (addSelectedTag(tagInput)) setTagInput("");
+  };
 
-    const intervalId = setInterval(async () => {
-      if (Date.now() - startTime > POLLING_TIMEOUT) {
-        clearInterval(intervalId);
-        toast({
-          title: t("toast_refresh_timeout_title"),
-          description: t("toast_refresh_timeout_description"),
-          variant: "destructive",
-        });
-        setJobId(undefined);
-        return;
-      }
+  const tagOptions = availableTags.filter((tag) => !selectedTags.includes(tag));
 
-      try {
-        const { status } = await getJobStatusAction(jobId);
+  const handleJobComplete = React.useCallback(() => {
+    toast({
+      "data-result": "success",
+      "data-testid": "repository-update-result",
+      title: t("toast_refresh_success_title"),
+      description: t("toast_refresh_success_description"),
+    });
+    router.refresh();
+  }, [router, t, toast]);
 
-        if (status === "complete") {
-          clearInterval(intervalId);
-          toast({
-            title: t("toast_refresh_success_title"),
-            description: t("toast_refresh_success_description"),
-          });
-          router.refresh();
-          setJobId(undefined);
-        } else if (status === "error") {
-          clearInterval(intervalId);
-          toast({
-            title: t("toast_refresh_error_title"),
-            description: t("toast_refresh_error_description"),
-            variant: "destructive",
-          });
-          setJobId(undefined);
-        }
-      } catch (error: unknown) {
-        clearInterval(intervalId);
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_refresh_error_title"),
-          description: t("toast_refresh_error_description"),
-          variant: "destructive",
-        });
-        setJobId(undefined);
-      }
-    }, POLLING_INTERVAL);
+  const handleJobError = React.useCallback(() => {
+    toast({
+      "data-result": "error",
+      "data-testid": "repository-update-result",
+      title: t("toast_refresh_error_title"),
+      description: t("toast_refresh_error_description"),
+      variant: "destructive",
+    });
+  }, [t, toast]);
 
-    return () => clearInterval(intervalId);
-  }, [jobId, router, t, toast]);
+  const handleJobTimeout = React.useCallback(() => {
+    toast({
+      title: t("toast_refresh_timeout_title"),
+      description: t("toast_refresh_timeout_description"),
+      variant: "destructive",
+    });
+  }, [t, toast]);
+
+  const handleJobDone = React.useCallback(() => {
+    setJobId(undefined);
+  }, []);
+
+  useJobPolling({
+    jobId,
+    onComplete: handleJobComplete,
+    onError: handleJobError,
+    onTimeout: handleJobTimeout,
+    onDone: handleJobDone,
+  });
 
   React.useEffect(() => {
     const textarea = textareaRef.current;
@@ -268,360 +227,44 @@ export function RepositoryForm({
     }
   }, [urls]);
 
-  // Package form effects
-  React.useEffect(() => {
-    if (isPkgPending) {
-      hasPkgProcessedResult.current = false;
-    }
-  }, [isPkgPending]);
-
-  React.useEffect(() => {
-    if (pkgState.error) {
-      toast({
-        title: tp("toast_generic_error"),
-        description: pkgState.error,
-        variant: "destructive",
-      });
-      hasPkgProcessedResult.current = true;
-    }
-    if (pkgState.toast && !hasPkgProcessedResult.current) {
-      toast({
-        title: pkgState.toast.title,
-        description: pkgState.toast.description,
-      });
-    }
-    if (pkgState.success && !hasPkgProcessedResult.current) {
-      hasPkgProcessedResult.current = true;
-      setPackageUrls("");
-      if (pkgState.jobId) {
-        setPkgJobId(pkgState.jobId);
-      }
-    }
-  }, [pkgState, tp, toast]);
-
-  React.useEffect(() => {
-    if (!pkgJobId) return;
-    const POLLING_INTERVAL = 2000;
-    const POLLING_TIMEOUT = 5 * 60 * 1000;
-    const startTime = Date.now();
-    const intervalId = setInterval(async () => {
-      if (Date.now() - startTime > POLLING_TIMEOUT) {
-        clearInterval(intervalId);
-        setPkgJobId(undefined);
-        return;
-      }
-      try {
-        const result = await getJobStatusAction(pkgJobId);
-        if (reloadIfServerActionStale(result)) return;
-        if (result?.status === "complete" || result?.status === "error") {
-          clearInterval(intervalId);
-          setPkgJobId(undefined);
-          router.refresh();
-        }
-      } catch {
-        clearInterval(intervalId);
-        setPkgJobId(undefined);
-      }
-    }, POLLING_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [pkgJobId, router]);
-
-  const submitResolvedLines = React.useCallback(
-    (lines: string[]) => {
-      const fd = new FormData();
-      fd.set("urls", lines.join("\n"));
-      formAction(fd);
-    },
-    [formAction],
-  );
-
-  const resolveLinesAndSubmit = React.useCallback(
-    async (lines: string[], startIndex = 0, seedResolved: string[] = []) => {
-      const resolved: string[] = [...seedResolved];
-
-      for (let i = startIndex; i < lines.length; i += 1) {
-        const raw = lines[i]?.trim() ?? "";
-        if (!raw) continue;
-
-        if (isHttpUrl(raw)) {
-          resolved.push(raw);
-          continue;
-        }
-
-        if (!isOwnerRepoShorthand(raw)) {
-          resolved.push(raw);
-          continue;
-        }
-
-        const result = await resolveRepoProvidersAction(raw);
-        const candidates = result.candidates.map((c) => ({
-          provider: c.provider,
-          providerHost: c.providerHost,
-          canonicalRepoUrl: c.canonicalRepoUrl,
-        }));
-
-        if (candidates.length === 1) {
-          resolved.push(candidates[0].canonicalRepoUrl);
-          continue;
-        }
-
-        if (candidates.length > 1) {
-          setProviderDialogRepo(raw);
-          setProviderDialogCandidates(candidates);
-          setProviderDialogPendingState({
-            lines,
-            nextIndex: i + 1,
-            resolvedLines: resolved,
-          });
-          setProviderDialogOpen(true);
-          return;
-        }
-
-        resolved.push(raw);
-      }
-
-      submitResolvedLines(resolved);
-    },
-    [submitResolvedLines],
-  );
-
-  const handleChooseProvider = (candidateUrl: string) => {
-    const pending = providerDialogPendingState;
-    if (!pending) return;
-
-    setProviderDialogOpen(false);
-    setProviderDialogRepo(null);
-    setProviderDialogCandidates([]);
-    setProviderDialogPendingState(null);
-
-    hasProcessedResult.current = false;
-    startProviderResolveTransition(async () => {
-      await resolveLinesAndSubmit(pending.lines, pending.nextIndex, [
-        ...pending.resolvedLines,
-        candidateUrl,
-      ]);
-    });
-  };
-
-  const orderedProviderCandidates = React.useMemo(() => {
-    const order: Record<ProviderChoiceCandidate["provider"], number> = {
-      github: 0,
-      gitlab: 1,
-      codeberg: 2,
-    };
-    return [...providerDialogCandidates].sort(
-      (a, b) =>
-        order[a.provider] - order[b.provider] ||
-        (a.providerHost ?? "").localeCompare(b.providerHost ?? ""),
-    );
-  }, [providerDialogCandidates]);
-
-  const handleImportClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const prepareImportPreview = React.useCallback(
-    (importedData: Repository[], skippedImages?: number) => {
-      const newRepos = importedData.filter(
-        (repo) => !currentRepositoryIds.has(repo.id),
-      );
-      const existingCount = importedData.length - newRepos.length;
-
-      setReposToImport(importedData);
-      setImportStats({
-        newCount: newRepos.length,
-        existingCount,
-        skippedImages,
-      });
-      setIsDialogVisible(true);
-    },
-    [currentRepositoryIds],
-  );
-
-  const handleFileChange = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const content = e.target?.result as string;
-
-        if (isComposeFileName(file.name)) {
-          startImportTransition(async () => {
-            try {
-              const result = await previewComposeImportAction(
-                file.name,
-                content,
-              );
-              if (!result.success) {
-                toast({
-                  title: t("toast_import_error_title"),
-                  description:
-                    result.error ?? t("toast_import_error_description"),
-                  variant: "destructive",
-                });
-                return;
-              }
-
-              const skippedImages = Object.values(result.skipped).reduce(
-                (sum, count) => sum + count,
-                0,
-              );
-              if (result.repositories.length === 0 && skippedImages === 0) {
-                toast({
-                  title: t("toast_import_error_title"),
-                  description: t("toast_import_error_no_compose_images"),
-                  variant: "destructive",
-                });
-                return;
-              }
-
-              prepareImportPreview(result.repositories, skippedImages);
-            } catch (error: unknown) {
-              if (reloadIfServerActionStale(error)) {
-                return;
-              }
-              toast({
-                title: t("toast_import_error_title"),
-                description: t("toast_import_error_description"),
-                variant: "destructive",
-              });
-            }
-          });
-          return;
-        }
-
-        const importedData = JSON.parse(content);
-
-        if (Array.isArray(importedData)) {
-          const isValidFormat = importedData.every(
-            (item) =>
-              typeof item === "object" &&
-              item !== null &&
-              "id" in item &&
-              "url" in item,
-          );
-
-          if (!isValidFormat) {
-            throw new Error(t("toast_import_error_invalid_format"));
-          }
-
-          prepareImportPreview(importedData);
-        } else {
-          toast({
-            title: t("toast_import_error_title"),
-            description: t("toast_import_error_invalid_format"),
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        const description =
-          error instanceof Error && error.message
-            ? error.message
-            : typeof error === "string"
-              ? error
-              : t("toast_import_error_parsing");
-        toast({
-          title: t("toast_import_error_title"),
-          description,
-          variant: "destructive",
-        });
-      }
-    };
-    reader.onerror = () => {
-      toast({
-        title: t("toast_import_error_title"),
-        description: t("toast_import_error_reading"),
-        variant: "destructive",
-      });
-    };
-    reader.readAsText(file);
-    setFileInputKey(Date.now());
-  };
-
-  const handleConfirmImport = () => {
-    if (!reposToImport) return;
-
-    startImportTransition(async () => {
-      try {
-        const result = await importRepositoriesAction(reposToImport);
-
-        if (result.success) {
-          toast({
-            title: t("toast_import_success_title"),
-            description: result.message,
-          });
-          if (result.jobId) {
-            setJobId(result.jobId);
-          }
-        } else {
-          toast({
-            title: t("toast_import_error_title"),
-            description: result.message,
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_import_error_title"),
-          description: t("toast_import_error_description"),
-          variant: "destructive",
-        });
-      } finally {
-        setIsDialogVisible(false);
-        setReposToImport(null);
-        setImportStats(null);
-      }
-    });
-  };
-
   return (
     <>
       <Card>
         <CardHeader>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle>
-              {activeTab === "releases" ? t("title") : tp("title")}
-            </CardTitle>
+            <CardTitle>{t("title")}</CardTitle>
             <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
               <input
-                key={fileInputKey}
+                key={importWorkflow.fileInputKey}
                 type="file"
-                ref={fileInputRef}
-                onChange={handleFileChange}
+                ref={importWorkflow.fileInputRef}
+                onChange={importWorkflow.handleFileChange}
                 accept=".json,.yml,.yaml"
-                className="hidden"
-              />
-              <input
-                key={`json-${fileInputKey}`}
-                type="file"
-                onChange={handleFileChange}
-                accept=".json"
                 className="hidden"
               />
               {!isExpanded && (
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={handleImportClick}
+                  onClick={importWorkflow.selectFile}
                   className="min-w-0 flex-1 sm:flex-none"
-                  disabled={isPending || isImporting || !!jobId || !isOnline}
+                  disabled={
+                    isPending ||
+                    importWorkflow.isImporting ||
+                    !!jobId ||
+                    !isOnline
+                  }
                 >
-                  {isImporting ? (
+                  {importWorkflow.isImporting ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
-                    <Upload className="mr-2 h-4 w-4" />
+                    <Upload className="me-2 h-4 w-4" />
                   )}
                   {t("button_import")}
                 </Button>
               )}
               <Button
+                data-testid="repository-form-toggle"
                 type="button"
                 variant="ghost"
                 size="icon"
@@ -638,7 +281,7 @@ export function RepositoryForm({
                 <ChevronDown
                   className={cn(
                     "size-5 transition-transform duration-200 ease-out",
-                    isExpanded ? "rotate-0" : "rotate-90",
+                    isExpanded ? "rotate-0" : "rotate-90 rtl:-rotate-90",
                   )}
                 />
               </Button>
@@ -657,275 +300,265 @@ export function RepositoryForm({
         >
           <div className="min-h-0 overflow-hidden">
             <CardContent className="pt-0">
-              <div className="flex items-center gap-2 mb-4">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("releases")}
-                  className={cn(
-                    "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
-                    activeTab === "releases"
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                  )}
-                >
-                  {tp("tab_releases")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("packages")}
-                  className={cn(
-                    "px-3 py-1.5 text-sm font-medium rounded-md transition-colors",
-                    activeTab === "packages"
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                  )}
-                >
-                  {tp("tab_packages")}
-                </button>
-              </div>
               <CardDescription className="mb-6">
-                {activeTab === "releases"
-                  ? t("description")
-                  : tp("description")}
+                {t("description")}
               </CardDescription>
-              {activeTab === "releases" ? (
-                <form
-                  onSubmit={(e) => {
-                    if (
-                      typeof navigator !== "undefined" &&
-                      !navigator.onLine
-                    ) {
-                      e.preventDefault();
-                      toast({
-                        title: t("toast_fail_title"),
-                        description: t("toast_generic_error"),
-                        variant: "destructive",
-                      });
-                      return;
-                    }
-
+              <form
+                onSubmit={(e) => {
+                  if (typeof navigator !== "undefined" && !navigator.onLine) {
                     e.preventDefault();
-                    if (!urls.trim()) return;
-                    if (
-                      isPending ||
-                      isResolvingProviders ||
-                      providerDialogOpen
-                    ) {
-                      return;
-                    }
-                    if (jobId) return;
-
-                    hasProcessedResult.current = false;
-                    const lines = urls
-                      .split("\n")
-                      .map((u) => u.trim())
-                      .filter((u) => u !== "");
-
-                    startProviderResolveTransition(async () => {
-                      await resolveLinesAndSubmit(lines);
+                    toast({
+                      title: t("toast_fail_title"),
+                      description: t("toast_generic_error"),
+                      variant: "destructive",
                     });
-                  }}
-                >
-                  <div className="grid w-full gap-2">
-                    <Textarea
-                      ref={textareaRef}
-                      name="urls"
-                      placeholder={t("placeholder")}
-                      value={urls}
-                      onChange={(e) => setUrls(e.target.value)}
-                      rows={4}
-                      wrap="off"
-                      className="resize-none overflow-y-auto overflow-x-auto max-h-80"
+                    return;
+                  }
+
+                  e.preventDefault();
+                  if (!urls.trim()) return;
+                  if (
+                    isPending ||
+                    providerWorkflow.isResolving ||
+                    providerWorkflow.dialogOpen
+                  ) {
+                    return;
+                  }
+                  if (jobId) return;
+
+                  const lines = urls
+                    .split("\n")
+                    .map((u) => u.trim())
+                    .filter((u) => u !== "");
+
+                  providerWorkflow.submit(lines);
+                }}
+              >
+                <div className="grid w-full gap-2">
+                  <Textarea
+                    dir="ltr"
+                    ref={textareaRef}
+                    name="urls"
+                    placeholder={t("placeholder")}
+                    value={urls}
+                    onChange={(e) => setUrls(e.target.value)}
+                    rows={4}
+                    wrap="off"
+                    className="resize-none overflow-y-auto overflow-x-auto max-h-80"
+                    disabled={
+                      !isExpanded ||
+                      isPending ||
+                      providerWorkflow.isResolving ||
+                      !!jobId ||
+                      providerWorkflow.dialogOpen
+                    }
+                  />
+                  <fieldset className="mt-2 rounded-md border p-3">
+                    <legend className="px-1 text-sm font-medium">
+                      {t("existing_tags_label")}
+                    </legend>
+                    <p className="mb-3 text-xs text-muted-foreground">
+                      {t("existing_tags_hint")}
+                    </p>
+                    {selectedTags.length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-2">
+                        {selectedTags.map((tag) => (
+                          <span
+                            key={tag}
+                            className="inline-flex max-w-full items-center gap-1 rounded-full bg-secondary py-1 ps-3 pe-1 text-sm text-secondary-foreground"
+                          >
+                            <bdi dir="ltr" className="truncate">
+                              {tag}
+                            </bdi>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedTags((current) =>
+                                  current.filter((entry) => entry !== tag),
+                                );
+                                setTagError(false);
+                              }}
+                              className="rounded-full p-0.5 hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                              aria-label={t("tags_remove_aria", { tag })}
+                            >
+                              <X className="size-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <RepositoryTagPicker
+                      id={tagsInputId}
+                      options={tagOptions}
+                      selectedTags={selectedTags}
+                      value={tagInput}
+                      onValueChange={(value) => {
+                        setTagInput(value);
+                        setTagError(false);
+                      }}
+                      onTagSelect={addSelectedTag}
+                      onCreateTag={addSelectedTag}
+                      onInputBlur={commitTagInput}
+                      placeholder={t("tags_input_placeholder")}
+                      listboxLabel={t("tags_existing_label")}
+                      createOptionLabel={(tag) =>
+                        t("tags_create_option", { tag })
+                      }
+                      ariaLabel={t("tags_input_aria")}
                       disabled={
                         !isExpanded ||
                         isPending ||
-                        isResolvingProviders ||
+                        providerWorkflow.isResolving ||
+                        providerWorkflow.dialogOpen ||
                         !!jobId ||
-                        providerDialogOpen
+                        !isOnline ||
+                        selectedTags.length >= MAX_REPOSITORY_TAGS
+                      }
+                      invalid={tagError}
+                    />
+                    {tagError && (
+                      <p className="mt-2 text-sm text-destructive">
+                        {t("tags_error_invalid")}
+                      </p>
+                    )}
+                  </fieldset>
+                  <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={importWorkflow.selectFile}
+                      className="mt-2 w-full sm:mt-0 sm:w-auto"
+                      disabled={
+                        !isExpanded ||
+                        isPending ||
+                        importWorkflow.isImporting ||
+                        !!jobId ||
+                        !isOnline
+                      }
+                    >
+                      {importWorkflow.isImporting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Upload className="me-2 h-4 w-4" />
+                      )}
+                      {t("button_import")}
+                    </Button>
+                    <SubmitButton
+                      isDisabled={
+                        !isExpanded ||
+                        !urls.trim() ||
+                        !isOnline ||
+                        providerWorkflow.isResolving ||
+                        providerWorkflow.dialogOpen
+                      }
+                      isPending={
+                        isPending || !!jobId || providerWorkflow.isResolving
                       }
                     />
-                    <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={handleImportClick}
-                        className="mt-2 w-full sm:mt-0 sm:w-auto"
-                        disabled={
-                          !isExpanded ||
-                          isPending ||
-                          isImporting ||
-                          !!jobId ||
-                          !isOnline
-                        }
-                      >
-                        {isImporting ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Upload className="mr-2 h-4 w-4" />
-                        )}
-                        {t("button_import")}
-                      </Button>
-                      <SubmitButton
-                        isDisabled={
-                          !isExpanded ||
-                          !urls.trim() ||
-                          !isOnline ||
-                          isResolvingProviders ||
-                          providerDialogOpen
-                        }
-                        isPending={
-                          isPending || !!jobId || isResolvingProviders
-                        }
-                      />
-                    </div>
                   </div>
-                </form>
-              ) : (
-                <form
-                  action={pkgFormAction}
-                  onSubmit={(e) => {
-                    if (
-                      typeof navigator !== "undefined" &&
-                      !navigator.onLine
-                    ) {
-                      e.preventDefault();
-                      toast({
-                        title: tp("toast_generic_error"),
-                        description: tp("toast_generic_error"),
-                        variant: "destructive",
-                      });
-                    }
-                  }}
-                >
-                  <div className="grid w-full gap-3">
-                    <Textarea
-                      name="urls"
-                      placeholder={tp("placeholder")}
-                      value={packageUrls}
-                      onChange={(e) => setPackageUrls(e.target.value)}
-                      rows={3}
-                      wrap="off"
-                      className="resize-none overflow-y-auto overflow-x-auto max-h-60"
-                      disabled={!isExpanded || isPkgPending || !!pkgJobId}
-                    />
-                    <div>
-                      <label
-                        htmlFor="pkg-tags"
-                        className="text-sm font-medium mb-1 block"
-                      >
-                        {tp("tags_label")}
-                      </label>
-                      <Input
-                        id="pkg-tags"
-                        name="tags"
-                        placeholder={tp("tags_placeholder")}
-                        value={packageTags}
-                        onChange={(e) => setPackageTags(e.target.value)}
-                        disabled={!isExpanded || isPkgPending || !!pkgJobId}
-                      />
-                    </div>
-                    <div className="flex justify-end">
-                      <Button
-                        type="submit"
-                        disabled={
-                          !isExpanded ||
-                          !packageUrls.trim() ||
-                          !packageTags.trim() ||
-                          isPkgPending ||
-                          !!pkgJobId ||
-                          !isOnline
-                        }
-                      >
-                        {isPkgPending || !!pkgJobId ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        ) : null}
-                        {tp("button_add")}
-                      </Button>
-                    </div>
-                  </div>
-                </form>
-              )}
+                </div>
+              </form>
             </CardContent>
           </div>
         </div>
       </Card>
 
       <AlertDialog
-        open={providerDialogOpen}
-        onOpenChange={(open) => {
-          setProviderDialogOpen(open);
-          if (!open) {
-            setProviderDialogRepo(null);
-            setProviderDialogCandidates([]);
-            setProviderDialogPendingState(null);
-          }
-        }}
+        open={providerWorkflow.dialogOpen}
+        onOpenChange={providerWorkflow.setOpen}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("provider_select_title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              {providerDialogRepo
-                ? t("provider_select_description", { repo: providerDialogRepo })
+              {providerWorkflow.dialogRepo
+                ? t("provider_select_description", {
+                    repo: isolateLtrText(providerWorkflow.dialogRepo),
+                  })
                 : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between sm:space-x-0">
+          <AlertDialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-start">
-              {orderedProviderCandidates.map((candidate) => (
+              {providerWorkflow.dialogCandidates.map((candidate) => (
                 <AlertDialogAction
                   key={`${candidate.provider}-${candidate.canonicalRepoUrl}`}
                   onClick={() =>
-                    handleChooseProvider(candidate.canonicalRepoUrl)
+                    providerWorkflow.chooseProvider(candidate.canonicalRepoUrl)
                   }
-                  disabled={isResolvingProviders || isPending}
+                  disabled={providerWorkflow.isResolving || isPending}
                 >
-                  {candidate.provider === "codeberg"
-                    ? t("provider_select_codeberg")
-                    : candidate.provider === "gitlab"
-                      ? `${t("provider_select_gitlab")}${
-                          candidate.providerHost
-                            ? ` (${candidate.providerHost})`
-                            : ""
-                        }`
-                      : t("provider_select_github")}
+                  {candidate.provider === "forgejo" ? (
+                    <>
+                      {t("provider_select_forgejo")}
+                      {candidate.providerBaseUrl ? (
+                        <>
+                          {" ("}
+                          <bdi dir="ltr">{candidate.providerBaseUrl}</bdi>
+                          {")"}
+                        </>
+                      ) : null}
+                    </>
+                  ) : candidate.provider === "codeberg" ? (
+                    t("provider_select_codeberg")
+                  ) : candidate.provider === "gitlab" ? (
+                    <>
+                      {t("provider_select_gitlab")}
+                      {candidate.providerHost ? (
+                        <>
+                          {" ("}
+                          <bdi dir="ltr">{candidate.providerHost}</bdi>
+                          {")"}
+                        </>
+                      ) : null}
+                    </>
+                  ) : (
+                    t("provider_select_github")
+                  )}
                 </AlertDialogAction>
               ))}
             </div>
-            <AlertDialogCancel disabled={isResolvingProviders || isPending}>
+            <AlertDialogCancel
+              disabled={providerWorkflow.isResolving || isPending}
+            >
               {t("cancel_button")}
             </AlertDialogCancel>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={isDialogVisible} onOpenChange={setIsDialogVisible}>
+      <AlertDialog
+        open={importWorkflow.dialogVisible}
+        onOpenChange={importWorkflow.setDialogVisible}
+      >
         <AlertDialogContent className="max-w-2xl">
           <AlertDialogHeader>
             <AlertDialogTitle>{t("import_dialog_title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              {importStats &&
+              {importWorkflow.stats &&
                 t("import_dialog_description", {
-                  newCount: importStats.newCount,
-                  existingCount: importStats.existingCount,
+                  newCount: importWorkflow.stats.newCount,
+                  existingCount: importWorkflow.stats.existingCount,
                 })}
-              {importStats?.skippedImages ? (
+              {importWorkflow.stats?.skippedImages ? (
                 <span className="mt-2 block">
                   {t("import_dialog_compose_skipped", {
-                    count: importStats.skippedImages,
+                    count: importWorkflow.stats.skippedImages,
                   })}
                 </span>
               ) : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {reposToImport?.length ? (
+          {importWorkflow.repositories?.length ? (
             <div className="max-h-72 overflow-y-auto rounded-md border">
               <div className="sticky top-0 border-b bg-background px-3 py-2 text-sm font-medium">
                 {t("import_dialog_repo_list_title")}
               </div>
               <ul className="divide-y">
-                {reposToImport.map((repo) => {
-                  const isExisting = currentRepositoryIds.has(repo.id);
+                {importWorkflow.repositories.map((repo) => {
+                  const isExisting = importWorkflow.currentRepositoryIds.has(
+                    repo.id,
+                  );
                   const providerName = getRepositoryProviderName(repo);
 
                   return (
@@ -945,7 +578,7 @@ export function RepositoryForm({
                           rel="noreferrer"
                           className="min-w-0 truncate text-sm font-medium text-foreground hover:underline"
                         >
-                          {getRepositoryDisplayName(repo)}
+                          <bdi dir="ltr">{getRepositoryDisplayName(repo)}</bdi>
                         </a>
                       </div>
                       <Badge
@@ -963,18 +596,18 @@ export function RepositoryForm({
             </div>
           ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isImporting}>
+            <AlertDialogCancel disabled={importWorkflow.isImporting}>
               {t("cancel_button")}
             </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleConfirmImport}
-              disabled={isImporting}
+            <Button
+              onClick={importWorkflow.confirmImport}
+              disabled={importWorkflow.isImporting}
             >
-              {isImporting ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              {importWorkflow.isImporting ? (
+                <Loader2 className="me-2 h-4 w-4 animate-spin" />
               ) : null}
               {t("import_dialog_confirm_button")}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -63,7 +63,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -86,7 +86,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
@@ -132,7 +132,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v4
@@ -158,29 +158,15 @@ jobs:
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}}
+          type=semver,pattern={{version}},prefix=v
+          type=semver,pattern={{major}}.{{minor}},prefix=v
+          type=semver,pattern={{major}},prefix=v
           type=sha,prefix=main-,enable={{is_default_branch}}
           type=sha,prefix=develop-,enable=${{ github.ref == 'refs/heads/develop' }}
           type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
           type=raw,value=dev,enable=${{ github.ref == 'refs/heads/develop' }}
 
     - name: Build and push Docker image
-      id: build_and_push_attempt_1
-      uses: docker/build-push-action@v7
-      continue-on-error: true
-      timeout-minutes: 30
-      with:
-        context: .
-        file: ./docker/Dockerfile
-        target: runner
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Build and push Docker image (retry)
-      if: steps.build_and_push_attempt_1.outcome != 'success'
       uses: docker/build-push-action@v7
       timeout-minutes: 30
       with:
@@ -200,7 +186,7 @@ jobs:
     timeout-minutes: 30
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4

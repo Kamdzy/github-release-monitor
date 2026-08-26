@@ -1,4 +1,12 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { defaultLocale } from "@/i18n/routing";
 import {
   NEXT_LOCALE_COOKIE,
@@ -12,10 +20,14 @@ const {
   handleI18nMock,
 } = vi.hoisted(() => {
   const handleI18n = vi.fn();
+  type AuthSession = {
+    session: { id: string };
+    user: { id: string };
+  } | null;
   return {
     createIntlMiddlewareMock: vi.fn(() => handleI18n),
     ensureAuthDatabaseReadyMock: vi.fn(async () => undefined),
-    getSessionMock: vi.fn(async () => null),
+    getSessionMock: vi.fn<() => Promise<AuthSession>>(async () => null),
     handleI18nMock: handleI18n,
   };
 });
@@ -73,8 +85,17 @@ vi.mock("next/server", () => {
       };
     }
 
-    static next() {
-      return new NextResponse(null, { status: 200 });
+    static next(init?: { request?: { headers?: Headers } }) {
+      const response = new NextResponse(null, { status: 200 });
+      if (init?.request?.headers) {
+        const names: string[] = [];
+        for (const [name, value] of init.request.headers) {
+          names.push(name);
+          response.headers.set(`x-middleware-request-${name}`, value);
+        }
+        response.headers.set("x-middleware-override-headers", names.join(","));
+      }
+      return response;
     }
     static redirect(input: string | URL) {
       const location = input instanceof URL ? input.toString() : String(input);
@@ -118,10 +139,13 @@ type JsonPayload = Record<string, unknown>;
 
 let fetchSettingsLocale: (
   request: MockRequest,
-  options?: { fetchImpl?: typeof fetch },
-) => Promise<string>;
+  options?: { fetchImpl?: typeof fetch; timeoutMs?: number },
+) => Promise<string | null>;
 let buildSettingsLocaleApiUrls: (request: MockRequest) => URL[];
+let getLocaleFromCookies: (request: MockRequest) => string | null;
 let proxyFn: ((request: MockRequest) => Promise<TestResponse>) | undefined;
+let proxyMatcher = "";
+let persistedSettingsLocale = defaultLocale;
 
 function createRequest(
   url: string,
@@ -132,6 +156,10 @@ function createRequest(
   if (cookieValues) {
     for (const [key, value] of Object.entries(cookieValues)) {
       cookieStore.set(key, value);
+    }
+    const configuredLocale = cookieValues[SETTINGS_LOCALE_COOKIE];
+    if (configuredLocale === "en" || configuredLocale === "de") {
+      persistedSettingsLocale = configuredLocale;
     }
   }
 
@@ -159,11 +187,19 @@ const createResponse = (
 
 beforeAll(async () => {
   const proxyModule = await import("@/proxy");
+  const settingsLocaleModule = await import("@/lib/proxy/settings-locale");
   fetchSettingsLocale = proxyModule.__test__
     .fetchSettingsLocale as unknown as typeof fetchSettingsLocale;
   buildSettingsLocaleApiUrls = proxyModule.__test__
     .buildSettingsLocaleApiUrls as unknown as typeof buildSettingsLocaleApiUrls;
+  getLocaleFromCookies =
+    settingsLocaleModule.getLocaleFromCookies as unknown as typeof getLocaleFromCookies;
   proxyFn = proxyModule.proxy as unknown as typeof proxyFn;
+  proxyMatcher = proxyModule.config.matcher[0];
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
 });
 
 function getProxy() {
@@ -180,9 +216,9 @@ describe("fetchSettingsLocale", () => {
   });
 
   it("tries configured allowed origins before localhost fallback", async () => {
-    process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS = "https://public.example.com";
-    const request = createRequest("https://public.example.com/en/dashboard", {
-      host: "public.example.com",
+    process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS = "https://public.example.test";
+    const request = createRequest("https://public.example.test/en/dashboard", {
+      host: "public.example.test",
       "x-forwarded-proto": "https",
     });
 
@@ -216,16 +252,16 @@ describe("fetchSettingsLocale", () => {
       return (target as Request).url;
     });
     expect(
-      attempted.some((u) => u.startsWith("https://public.example.com")),
+      attempted.some((u) => u.startsWith("https://public.example.test")),
     ).toBe(true);
     expect(attempted.some((u) => u.startsWith("http://127.0.0.1:3000"))).toBe(
       true,
     );
   });
 
-  it("returns default locale when all attempts fail", async () => {
-    const request = createRequest("https://public.example.com/en", {
-      host: "public.example.com",
+  it("returns no persisted locale when all attempts fail", async () => {
+    const request = createRequest("https://public.example.test/en", {
+      host: "public.example.test",
     });
 
     const fetchMock = vi.fn(async () =>
@@ -236,8 +272,54 @@ describe("fetchSettingsLocale", () => {
       fetchImpl: fetchMock,
     });
 
-    expect(locale).toBe(defaultLocale);
+    expect(locale).toBeNull();
     expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("applies one timeout budget across all candidate origins", async () => {
+    const request = createRequest("https://public.example.test/en", {
+      host: "public.example.test",
+    });
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(1000)
+      .mockReturnValue(1025);
+    const fetchMock = vi.fn(async () =>
+      createResponse({ ok: false, status: 500 }),
+    );
+
+    try {
+      const locale = await fetchSettingsLocale(request, {
+        fetchImpl: fetchMock,
+        timeoutMs: 25,
+      });
+
+      expect(locale).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+describe("getLocaleFromCookies", () => {
+  it("uses a valid fallback cookie when the preferred cookie is invalid", () => {
+    const request = createRequest("https://example.test/", undefined, {
+      [SETTINGS_LOCALE_COOKIE]: "unsupported",
+      [NEXT_LOCALE_COOKIE]: "de",
+    });
+
+    expect(getLocaleFromCookies(request)).toBe("de");
+  });
+
+  it("keeps a valid settings cookie authoritative", () => {
+    const request = createRequest("https://example.test/", undefined, {
+      [SETTINGS_LOCALE_COOKIE]: "en",
+      [NEXT_LOCALE_COOKIE]: "de",
+    });
+
+    expect(getLocaleFromCookies(request)).toBe("en");
   });
 });
 
@@ -257,31 +339,42 @@ describe("buildSettingsLocaleApiUrls", () => {
 
     expect(origins).toContain("http://127.0.0.1:3000");
     expect(origins).toContain("http://localhost:3000");
-    expect(origins.some((origin) => origin.includes("example.com"))).toBe(
+    expect(origins.some((origin) => origin.includes("example.test"))).toBe(
       false,
     );
   });
 
   it("includes explicit non-loopback origins only from env allowlist", () => {
     process.env.SETTINGS_LOCALE_ALLOWED_ORIGINS =
-      "https://public.example.com,https://alt.example.com";
-    const request = createRequest("https://public.example.com/en", {
-      host: "attacker.example.com",
-      "x-forwarded-host": "attacker.example.com",
+      "https://public.example.test,https://alt.example.test";
+    const request = createRequest("https://public.example.test/en", {
+      host: "attacker.example.test",
+      "x-forwarded-host": "attacker.example.test",
     });
 
     const urls = buildSettingsLocaleApiUrls(request);
     const origins = urls.map((url) => url.origin);
 
-    expect(origins).toContain("https://public.example.com");
-    expect(origins).toContain("https://alt.example.com");
-    expect(origins).not.toContain("https://attacker.example.com");
+    expect(origins).toContain("https://public.example.test");
+    expect(origins).toContain("https://alt.example.test");
+    expect(origins).not.toContain("https://attacker.example.test");
   });
 });
 
 describe("proxy", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    persistedSettingsLocale = defaultLocale;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createResponse({
+          ok: true,
+          status: 200,
+          json: async () => ({ locale: persistedSettingsLocale }),
+        }),
+      ),
+    );
     delete process.env.AUTHENTICATION_METHOD;
     handleI18nMock.mockReset();
     createIntlMiddlewareMock.mockReset();
@@ -290,6 +383,73 @@ describe("proxy", () => {
     getSessionMock.mockResolvedValue(null);
     ensureAuthDatabaseReadyMock.mockReset();
     ensureAuthDatabaseReadyMock.mockResolvedValue(undefined);
+  });
+
+  it("uses persisted settings instead of a stale locale cookie", async () => {
+    const request = createRequest(
+      "https://example.test/en",
+      { host: "example.test" },
+      { [SETTINGS_LOCALE_COOKIE]: "en" },
+    );
+    persistedSettingsLocale = "de";
+
+    const response = await getProxy()(request);
+
+    expect(globalThis.fetch).toHaveBeenCalled();
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("https://example.test/de");
+    expect(response.cookies.get(SETTINGS_LOCALE_COOKIE)?.value).toBe("de");
+    expect(response.cookies.get(NEXT_LOCALE_COOKIE)?.value).toBe("de");
+  });
+
+  it("uses the locale cookie only while persisted settings are unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => createResponse({ ok: false, status: 500 })),
+    );
+    const request = createRequest(
+      "https://example.test/de/unknown",
+      { host: "example.test" },
+      { [SETTINGS_LOCALE_COOKIE]: "de" },
+    );
+
+    const response = await getProxy()(request);
+
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("https://example.test/de");
+  });
+
+  it("matches lookalike prefixes but excludes reserved route segments", () => {
+    const matcher = new RegExp(`^${proxyMatcher}$`);
+
+    for (const pathname of [
+      "/apiary",
+      "/trpc-tools",
+      "/_nextish",
+      "/_vercel-app",
+    ]) {
+      expect(matcher.test(pathname), pathname).toBe(true);
+    }
+    for (const pathname of [
+      "/api",
+      "/api/auth",
+      "/trpc/query",
+      "/_next/static/app.js",
+      "/_vercel/insights",
+    ]) {
+      expect(matcher.test(pathname), pathname).toBe(false);
+    }
+  });
+
+  it("redirects unknown paths that only resemble reserved prefixes", async () => {
+    const request = createRequest("https://example.test/apiary", {
+      host: "example.test",
+    });
+
+    const response = await getProxy()(request);
+
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe("https://example.test/en");
   });
 
   it("redirects unauthenticated users to locale login and sets cookies", async () => {
@@ -303,8 +463,8 @@ describe("proxy", () => {
     getSessionMock.mockResolvedValue(null);
 
     const request = createRequest(
-      "https://example.com/de/einstellungen",
-      { host: "example.com" },
+      "https://example.test/de/einstellungen",
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
@@ -321,6 +481,78 @@ describe("proxy", () => {
     expect(parsed?.searchParams.get("next")).toBe("/de/einstellungen");
     expect(response.cookies.get(SETTINGS_LOCALE_COOKIE)?.value).toBe("de");
     expect(response.cookies.get(NEXT_LOCALE_COOKIE)?.value).toBe("de");
+    expect(response.headers.get("Content-Security-Policy")).toContain(
+      "script-src",
+    );
+  });
+
+  it.each([
+    ["https://example.test/de/sdsadas", "de", "/de"],
+    [
+      "https://example.test/de/sdsadas?source=broken#details",
+      "en",
+      "/en?source=broken#details",
+    ],
+    ["https://example.test/sdsadas", "de", "/de"],
+    ["https://example.test/it/sdsadas", "en", "/en"],
+  ])(
+    "redirects unknown app path %s to the %s home page",
+    async (url, locale, expectedPath) => {
+      const request = createRequest(
+        url,
+        { host: "example.test" },
+        { [SETTINGS_LOCALE_COOKIE]: locale },
+      );
+
+      const response = await getProxy()(request);
+
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(
+        `https://example.test${expectedPath}`,
+      );
+      const expectedLocale = new URL(
+        `https://example.test${expectedPath}`,
+      ).pathname.startsWith("/de")
+        ? "de"
+        : "en";
+      expect(response.cookies.get(SETTINGS_LOCALE_COOKIE)?.value).toBe(
+        expectedLocale,
+      );
+      expect(response.cookies.get(NEXT_LOCALE_COOKIE)?.value).toBe(
+        expectedLocale,
+      );
+      expect(createIntlMiddlewareMock).not.toHaveBeenCalled();
+      expect(getSessionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("redirects dotted document paths while bypassing static asset requests", async () => {
+    const documentRequest = createRequest(
+      "https://example.test/de/missing.html",
+      { accept: "text/html", host: "example.test" },
+      { [SETTINGS_LOCALE_COOKIE]: "de" },
+    );
+
+    const documentResponse = await getProxy()(documentRequest);
+
+    expect(documentResponse.status).toBe(307);
+    expect(documentResponse.headers.get("location")).toBe(
+      "https://example.test/de",
+    );
+
+    vi.clearAllMocks();
+    const assetRequest = createRequest("https://example.test/missing.js", {
+      accept: "*/*",
+      host: "example.test",
+      "sec-fetch-dest": "script",
+    });
+
+    const assetResponse = await getProxy()(assetRequest);
+
+    expect(assetResponse.status).toBe(200);
+    expect(assetResponse.headers.get("location")).toBeNull();
+    expect(createIntlMiddlewareMock).not.toHaveBeenCalled();
+    expect(getSessionMock).not.toHaveBeenCalled();
   });
 
   it("redirects logged-in users away from the login page", async () => {
@@ -337,15 +569,15 @@ describe("proxy", () => {
     });
 
     const request = createRequest(
-      "https://example.com/de/anmelden",
-      { host: "example.com" },
+      "https://example.test/de/anmelden",
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
     const response = await getProxy()(request);
 
     expect(response.status).toBe(307);
-    expect(response.headers.get("location")).toBe("https://example.com/de");
+    expect(response.headers.get("location")).toBe("https://example.test/de");
     expect(response.cookies.get(SETTINGS_LOCALE_COOKIE)?.value).toBe("de");
     expect(response.cookies.get(NEXT_LOCALE_COOKIE)?.value).toBe("de");
   });
@@ -360,8 +592,8 @@ describe("proxy", () => {
     getSessionMock.mockResolvedValue(null);
 
     const request = createRequest(
-      "https://example.com/de/registrieren",
-      { host: "example.com" },
+      "https://example.test/de/registrieren",
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
@@ -382,8 +614,8 @@ describe("proxy", () => {
     getSessionMock.mockResolvedValue(null);
 
     const request = createRequest(
-      "https://example.com/de",
-      { host: "example.com" },
+      "https://example.test/de",
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
@@ -404,8 +636,8 @@ describe("proxy", () => {
     getSessionMock.mockResolvedValue(null);
 
     const request = createRequest(
-      "https://example.com/de/einstellungen",
-      { host: "example.com" },
+      "https://example.test/de/einstellungen",
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
@@ -429,8 +661,8 @@ describe("proxy", () => {
     getSessionMock.mockResolvedValue(null);
 
     const request = createRequest(
-      "https://example.com/de/einstellungen",
-      { host: "example.com" },
+      "https://example.test/de/einstellungen",
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
@@ -440,7 +672,11 @@ describe("proxy", () => {
     expect(getSessionMock).not.toHaveBeenCalled();
   });
 
-  it("redirects auth pages to home in External mode", async () => {
+  it.each([
+    "/de/anmelden",
+    "/de/passwort-vergessen",
+    "/de/passwort-zuruecksetzen",
+  ])("redirects auth page %s to home in External mode", async (pathname) => {
     expect(proxyFn).toBeDefined();
     const { NextResponse } = await import("next/server");
     process.env.AUTHENTICATION_METHOD = "External";
@@ -450,15 +686,15 @@ describe("proxy", () => {
     handleI18nMock.mockReturnValue(baseResponse);
 
     const request = createRequest(
-      "https://example.com/de/anmelden",
-      { host: "example.com" },
+      `https://example.test${pathname}`,
+      { host: "example.test" },
       { [SETTINGS_LOCALE_COOKIE]: "de" },
     );
 
     const response = await getProxy()(request);
 
     expect(response.status).toBe(307);
-    expect(response.headers.get("location")).toBe("https://example.com/de");
+    expect(response.headers.get("location")).toBe("https://example.test/de");
     expect(getSessionMock).not.toHaveBeenCalled();
   });
 
@@ -473,7 +709,7 @@ describe("proxy", () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const originalAllowed = process.env.ALLOWED_DEV_ORIGINS;
     process.env.NODE_ENV = "development";
-    process.env.ALLOWED_DEV_ORIGINS = "https://allowed.example.com";
+    process.env.ALLOWED_DEV_ORIGINS = "https://allowed.example.test";
 
     try {
       getSessionMock.mockResolvedValue({
@@ -482,10 +718,10 @@ describe("proxy", () => {
       });
 
       const request = createRequest(
-        "https://example.com/de",
+        "https://example.test/de",
         {
-          host: "example.com",
-          origin: "https://blocked.example.com",
+          host: "example.test",
+          origin: "https://blocked.example.test",
         },
         { [SETTINGS_LOCALE_COOKIE]: "de" },
       );
@@ -520,8 +756,8 @@ describe("proxy", () => {
 
     try {
       const request = createRequest(
-        "https://example.com/de",
-        { host: "example.com" },
+        "https://example.test/de",
+        { host: "example.test" },
         { [SETTINGS_LOCALE_COOKIE]: "de" },
       );
 
@@ -534,6 +770,14 @@ describe("proxy", () => {
       expect(response.headers.get("Content-Security-Policy")).toContain(
         "upgrade-insecure-requests",
       );
+      const csp = response.headers.get("Content-Security-Policy");
+      expect(csp).toMatch(/script-src 'self' 'nonce-[^']+' 'strict-dynamic'/);
+      expect(csp).not.toContain("'unsafe-eval'");
+      expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
+      expect(response.headers.get("x-middleware-request-x-nonce")).toBeTruthy();
+      expect(
+        response.headers.get("x-middleware-request-content-security-policy"),
+      ).toBe(csp);
       expect(response.headers.get("X-Frame-Options")).toBe("DENY");
       expect(response.cookies.get(NEXT_LOCALE_COOKIE)?.value).toBe("de");
     } finally {

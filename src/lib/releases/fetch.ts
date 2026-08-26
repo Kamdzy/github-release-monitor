@@ -1,4 +1,10 @@
 import { isRetryableFetchError } from "@/lib/fetch-retry";
+import {
+  consumeResponseWithTimeout,
+  discardResponseWithTimeout,
+  fetchWithAllowedRedirects,
+  fetchWithTimeout,
+} from "@/lib/http/fetch-with-timeout";
 import { log } from "@/lib/server-action-helpers";
 
 const warnRetry = (message: string) => log.warn(message);
@@ -16,6 +22,9 @@ export type FetchRetryContext = {
   maxAttempts?: number;
   initialDelayMs?: number;
   parseAttempts?: number;
+  timeoutMs?: number;
+  deadlineMs?: number;
+  allowedRedirectBaseUrl?: string;
 };
 
 export async function fetchWithRetry(
@@ -30,7 +39,14 @@ export async function fetchWithRetry(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await fetch(url, options);
+      return context?.allowedRedirectBaseUrl
+        ? await fetchWithAllowedRedirects(
+            url,
+            options,
+            context.allowedRedirectBaseUrl,
+            context.timeoutMs,
+          )
+        : await fetchWithTimeout(url, options, context?.timeoutMs);
     } catch (error) {
       const shouldRetry =
         attempt < maxAttempts &&
@@ -72,7 +88,10 @@ export async function fetchJsonResponseWithRetry<T>(
     }
 
     try {
-      const data = (await response.json()) as T;
+      const data = await consumeResponseWithTimeout(
+        response,
+        async (result) => (await result.json()) as T,
+      );
       return { response, data };
     } catch (error) {
       const shouldRetry =
@@ -98,6 +117,16 @@ export async function fetchJsonResponseWithRetry<T>(
 
 export type AuthMode = "none" | "token" | "bearer" | "basic";
 
+export function isRateLimitedResponse(
+  response: Response | null | undefined,
+): boolean {
+  return Boolean(
+    response &&
+      (response.status === 429 ||
+        (response.status === 403 && response.headers.get("retry-after"))),
+  );
+}
+
 export async function fetchJsonResponseWithRetryAuthChain<T>(
   url: string,
   chain: Array<{ mode: AuthMode; options: RequestInit }>,
@@ -113,8 +142,20 @@ export async function fetchJsonResponseWithRetryAuthChain<T>(
     const candidate = chain[i];
     const isLast = i === chain.length - 1;
 
+    const remainingMs = context?.deadlineMs
+      ? context.deadlineMs - Date.now()
+      : undefined;
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      throw new Error(`${description} exceeded its shared deadline.`);
+    }
+    const timeoutMs =
+      remainingMs === undefined
+        ? context?.timeoutMs
+        : Math.min(context?.timeoutMs ?? remainingMs, remainingMs);
+
     const result = await fetchJsonResponseWithRetry<T>(url, candidate.options, {
       ...context,
+      timeoutMs,
       description:
         candidate.mode === "none"
           ? description
@@ -123,14 +164,18 @@ export async function fetchJsonResponseWithRetryAuthChain<T>(
 
     // `304 Not Modified` is a valid response for our ETag usage; don't fall back.
     if (result.response.status === 304) {
+      await discardResponseWithTimeout(result.response);
       return { ...result, mode: candidate.mode };
     }
 
     // For auth-related errors, try the next candidate (if any).
     if (
       !isLast &&
-      (result.response.status === 401 || result.response.status === 403)
+      (result.response.status === 401 ||
+        (result.response.status === 403 &&
+          !isRateLimitedResponse(result.response)))
     ) {
+      await discardResponseWithTimeout(result.response);
       continue;
     }
 
@@ -169,11 +214,17 @@ export async function fetchResponseWithRetryAuthChain(
 
     // `304 Not Modified` is a valid response for our ETag usage; don't fall back.
     if (response.status === 304) {
+      await discardResponseWithTimeout(response);
       return { response, mode: candidate.mode };
     }
 
     // For auth-related errors, try the next candidate (if any).
-    if (!isLast && (response.status === 401 || response.status === 403)) {
+    if (
+      !isLast &&
+      (response.status === 401 ||
+        (response.status === 403 && !isRateLimitedResponse(response)))
+    ) {
+      await discardResponseWithTimeout(response);
       continue;
     }
 

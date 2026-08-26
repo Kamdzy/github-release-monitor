@@ -1,43 +1,39 @@
-import createNextIntlPlugin from 'next-intl/plugin';
-import { readFileSync } from 'fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { readFileSync } from "fs";
+import createNextIntlPlugin from "next-intl/plugin";
 
-const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
+const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
 
-const isProd = process.env.NODE_ENV === 'production';
+const isProd = process.env.NODE_ENV === "production";
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const packageJson = JSON.parse(
-  readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+  readFileSync(new URL("./package.json", import.meta.url), "utf8"),
 );
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  ...(isProd && { output: 'standalone' }),
+  ...(isProd && { output: "standalone" }),
   turbopack: {
     root: projectRoot,
   },
   env: {
-    NEXT_PUBLIC_APP_VERSION: packageJson.version ?? '0.0.0',
-  },
-
-  typescript: {
-    ignoreBuildErrors: true,
+    NEXT_PUBLIC_APP_VERSION: packageJson.version ?? "0.0.0",
   },
 
   images: {
     remotePatterns: [
       {
-        protocol: 'https',
-        hostname: 'placehold.co',
-        port: '',
-        pathname: '/**',
+        protocol: "https",
+        hostname: "placehold.co",
+        port: "",
+        pathname: "/**",
       },
       {
-        protocol: 'https',
-        hostname: 'developers.google.com',
-        port: '',
-        pathname: '/identity/images/**',
+        protocol: "https",
+        hostname: "developers.google.com",
+        port: "",
+        pathname: "/identity/images/**",
       },
     ],
   },

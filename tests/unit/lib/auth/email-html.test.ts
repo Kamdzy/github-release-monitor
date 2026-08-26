@@ -28,8 +28,37 @@ describe("auth/email HTML rendering", () => {
   });
 
   it("escapes dynamic HTML text and href attributes in auth emails", async () => {
-    const sendMailMock = vi.fn(async () => undefined);
-    const betterAuthMock = vi.fn((config) => ({ config }));
+    type MailOptions = { html: string };
+    type AuthEmailConfig = {
+      emailVerification: {
+        sendVerificationEmail: (args: {
+          user: { email: string };
+          url: string;
+          token: string;
+        }) => Promise<void>;
+      };
+      emailAndPassword: {
+        sendResetPassword: (args: {
+          user: { email: string };
+          url: string;
+          token: string;
+        }) => Promise<void>;
+      };
+      user: {
+        changeEmail: {
+          sendChangeEmailConfirmation: (args: {
+            user: { email: string };
+            newEmail: string;
+            url: string;
+            token: string;
+          }) => Promise<void>;
+        };
+      };
+    };
+    const sendMailMock = vi.fn<(_mail: MailOptions) => Promise<void>>(
+      async () => undefined,
+    );
+    const betterAuthMock = vi.fn((config: AuthEmailConfig) => ({ config }));
 
     vi.doMock("better-auth", () => ({
       betterAuth: betterAuthMock,
@@ -67,8 +96,12 @@ describe("auth/email HTML rendering", () => {
       },
     }));
 
-    await import("@/lib/auth");
+    const authModule = await import("@/lib/auth");
+    void authModule.auth.api;
     const authConfig = betterAuthMock.mock.calls[0]?.[0];
+    if (!authConfig) {
+      throw new Error("Expected Better Auth config");
+    }
 
     await authConfig.emailVerification.sendVerificationEmail({
       user: {
@@ -85,10 +118,23 @@ describe("auth/email HTML rendering", () => {
       url: `https://example.test/change?next=<x>&email="a'b\``,
       token: "token",
     });
+    await authConfig.emailAndPassword.sendResetPassword({
+      user: { email: `reset<user>"'&@example.test` },
+      url: `https://example.test/reset?next=<x>&token="a'b\``,
+      token: "token",
+    });
+    const { waitForBackgroundTasks } = await import(
+      "@/lib/runtime/background-tasks"
+    );
+    await waitForBackgroundTasks();
 
-    expect(sendMailMock).toHaveBeenCalledTimes(2);
+    expect(sendMailMock).toHaveBeenCalledTimes(3);
     const verificationEmail = sendMailMock.mock.calls[0]?.[0];
     const changeEmail = sendMailMock.mock.calls[1]?.[0];
+    const resetEmail = sendMailMock.mock.calls[2]?.[0];
+    if (!verificationEmail || !changeEmail || !resetEmail) {
+      throw new Error("Expected auth emails to be sent");
+    }
 
     expect(verificationEmail.html).toContain(
       "new&lt;user&gt;&quot;&#39;&amp;@example.test",
@@ -108,11 +154,16 @@ describe("auth/email HTML rendering", () => {
       'href="https://example.test/change?next=&lt;x&gt;&amp;email=&quot;a&#39;b&#96;"',
     );
     expect(changeEmail.html).not.toContain(`current<user>"'&@example.test`);
+    expect(resetEmail.html).toContain(
+      'href="https://example.test/reset?next=&lt;x&gt;&amp;token=&quot;a&#39;b&#96;"',
+    );
+    expect(resetEmail.html).not.toContain("token=\"a'b`");
   });
 
-  it("logs an actionable message when the auth database cannot be opened", async () => {
+  it("opens the auth database lazily and logs an actionable message when it fails", async () => {
     const error = new Error("unable to open database file");
     const logErrorMock = vi.fn();
+    const betterAuthMock = vi.fn();
     const scopedLogger = {
       error: logErrorMock,
       warn: vi.fn(),
@@ -127,7 +178,7 @@ describe("auth/email HTML rendering", () => {
       },
     }));
     vi.doMock("better-auth", () => ({
-      betterAuth: vi.fn(),
+      betterAuth: betterAuthMock,
     }));
     vi.doMock("better-auth/db/migration", () => ({
       getMigrations: vi.fn(),
@@ -154,7 +205,10 @@ describe("auth/email HTML rendering", () => {
       },
     }));
 
-    await expect(import("@/lib/auth")).rejects.toThrow(
+    const authModule = await import("@/lib/auth");
+    expect(betterAuthMock).not.toHaveBeenCalled();
+
+    await expect(authModule.ensureAuthDatabaseReady()).rejects.toThrow(
       "unable to open database file",
     );
 

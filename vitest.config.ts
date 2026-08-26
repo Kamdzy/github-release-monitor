@@ -1,32 +1,31 @@
-import path from 'node:path';
-import { defineConfig } from 'vitest/config';
-import react from '@vitejs/plugin-react-swc';
+import path from "node:path";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
   test: {
-    environment: 'node',
+    environment: "node",
     globals: true,
-    setupFiles: ['vitest.setup.ts'],
-    include: [
-      'tests/unit/**/*.{test,spec}.{ts,tsx,js,jsx}',
-    ],
-    exclude: [
-      'node_modules',
-      'dist',
-      '.next',
-      '.git',
-      'tests/e2e',
-    ],
+    setupFiles: ["vitest.setup.ts"],
+    maxWorkers: "50%",
+    testTimeout: 10_000,
+    include: ["tests/unit/**/*.{test,spec}.{ts,tsx,js,jsx}"],
+    exclude: ["node_modules", "dist", ".next", ".git", "tests/e2e"],
+    sequence: {
+      // Global teardown waits for tracked background work before individual
+      // test files restore process-wide mocks such as global.fetch.
+      hooks: "list",
+    },
     coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html', 'lcov'],
-      include: ['src/**/*.{ts,tsx}'],
+      provider: "v8",
+      reporter: ["text", "html", "lcov"],
+      include: ["src/**/*.{ts,tsx}"],
     },
   },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, 'src'),
+      "@": path.resolve(import.meta.dirname ?? ".", "src"),
     },
   },
 });

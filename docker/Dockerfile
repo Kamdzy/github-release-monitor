@@ -23,9 +23,10 @@ COPY components.json \
 # Copy source files
 COPY public/ ./public/
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 
 # Build the application
-RUN BETTER_AUTH_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+RUN BETTER_AUTH_SECRET=9f3c7a1e5b8d2f604a9c1e7b3d5f8062c4a8e1b7d9f3056c2e4a8b1d7f9c3e50 \
     BETTER_AUTH_URL=http://localhost:3000 \
     npm run build
 
@@ -42,6 +43,9 @@ RUN npm ci && npm cache clean --force
 COPY biome.json ./
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY tests/ ./tests/
+COPY scripts/ ./scripts/
+COPY .github/actions/star-history/ ./.github/actions/star-history/
 
 RUN npm run lint
 
@@ -55,13 +59,17 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY package*.json ./
 RUN npm ci && npm cache clean --force
 
-COPY tsconfig.json ./
+COPY tsconfig.json \
+     vitest.setup.ts \
+     ./
 COPY src/ ./src/
+COPY tests/ ./tests/
 
 RUN npm run typecheck
+RUN npm run typecheck:tests
 
-# Test Stage (runs unit tests with Vitest)
-FROM node:24-alpine AS tester
+# Shared unit test stage
+FROM node:24-alpine AS test-base
 
 WORKDIR /app
 
@@ -85,12 +93,23 @@ COPY components.json \
 COPY public/ ./public/
 COPY src/ ./src/
 COPY tests/ ./tests/
+COPY .github/actions/star-history/ ./.github/actions/star-history/
 
-# Run tests during image build; build fails if tests fail
-RUN npm test
+# Test Stage (full output for CI and manual runs)
+FROM test-base AS tester
+
+RUN npm test -- --reporter=dot
+RUN node --test .github/actions/star-history/index.test.js
+
+# Agent Test Stage (only report failed tests and their errors)
+FROM test-base AS tester-agent
+
+RUN npm test -- --reporter=minimal
+RUN node --test .github/actions/star-history/index.test.js >/tmp/star-history-tests.log \
+ || (cat /tmp/star-history-tests.log; exit 1)
 
 # E2E Stage (Playwright)
-FROM mcr.microsoft.com/playwright:v1.60.0-jammy AS e2e
+FROM mcr.microsoft.com/playwright:v1.62.1-resolute AS e2e
 
 WORKDIR /app
 
@@ -102,7 +121,7 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
     BETTER_AUTH_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
     BETTER_AUTH_URL=http://localhost:3000 \
     AUTH_SETUP_TOKEN=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy \
-    AUTH_EMAIL=test@example.com \
+    AUTH_EMAIL=test@example.test \
     AUTH_PASSWORD=TestPassword123
 
 # Copy minimal files for running tests and server
@@ -112,6 +131,7 @@ RUN npm install --omit=optional --no-audit --no-fund --production=false \
 
 COPY playwright.config.ts ./
 COPY tests/e2e ./tests/e2e
+COPY src/i18n/config.ts ./src/i18n/config.ts
 
 # Copy built application from builder stage
 COPY --from=builder /app/.next/standalone ./
@@ -143,6 +163,7 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/cli/grm-cli.mjs ./grm-cli.mjs
 
 # Switch to non-root user
 USER nextjs

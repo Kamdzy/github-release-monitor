@@ -1,131 +1,93 @@
-import { sendNotification } from "@/lib/notifications";
+import { getConfiguredNotificationChannels } from "@/lib/notifications";
+import {
+  applyPendingNotificationDeliveryOutcomes,
+  attemptPendingNotifications,
+  enqueuePendingNotification,
+  pruneAbandonedNotifications,
+} from "@/lib/notifications/pending-deliveries";
 import {
   getLatestDigestsForPackages,
   processPackageChange,
 } from "@/lib/packages/package-actions";
 import { getLatestReleasesForRepos } from "@/lib/releases";
+import { resolveParallelRepoFetches } from "@/lib/releases/filters";
 import {
-  applyEtagUpdate,
-  canReplaceCachedReleaseWithVirtual,
-  resolveParallelRepoFetches,
-  toCachedRelease,
-} from "@/lib/releases/filters";
-import { hasAnyGitlabTokenForAllowedHosts } from "@/lib/repositories/providers";
+  hasAnyForgejoToken,
+  hasAnyGitlabTokenForAllowedHosts,
+} from "@/lib/repositories/providers";
+import { applyReleaseFetchResultToRepository } from "@/lib/repositories/release-cache-update";
+import { scheduleProcessTask } from "@/lib/runtime/process-task-queue";
 import { filterRepositoriesDueForBackgroundCheck } from "@/lib/runtime/repository-schedule";
 import { scheduleTask } from "@/lib/runtime/task-scheduler";
 import { log } from "@/lib/server-action-helpers";
 import { getRepositories, saveRepositories } from "@/lib/storage/repositories";
 import { getSettings } from "@/lib/storage/settings";
+import type { AppSettings, EnrichedRelease, Locale, Repository } from "@/types";
 
-async function _checkForNewReleasesUnscheduled(options?: {
-  overrideLocale?: string;
-  skipCache?: boolean;
-  onlyDue?: boolean;
+async function applyReleaseCheckResults({
+  originalRepos,
+  enrichedReleases,
+  settings,
+  effectiveLocale,
+  backgroundCheckStartedAtIso,
+  markDueChecks,
+  notificationChannels,
+  notificationBatchId,
+}: {
+  originalRepos: Repository[];
+  enrichedReleases: EnrichedRelease[];
+  settings: AppSettings;
+  effectiveLocale: Locale;
+  backgroundCheckStartedAtIso: string;
+  markDueChecks: boolean;
+  notificationChannels: ReturnType<typeof getConfiguredNotificationChannels>;
+  notificationBatchId: string;
 }) {
-  log.info(`Running check for new releases...`);
-  const settings = await getSettings();
-  const backgroundCheckStartedAt = new Date();
-  const backgroundCheckStartedAtIso = backgroundCheckStartedAt.toISOString();
-  const effectiveLocale = options?.overrideLocale || settings.locale;
-  const parallelLimit = resolveParallelRepoFetches(settings);
-  const tokenConfigured = !!process.env.GITHUB_ACCESS_TOKEN?.trim();
-  const codebergTokenConfigured = !!process.env.CODEBERG_ACCESS_TOKEN?.trim();
-  const gitlabTokenConfigured = hasAnyGitlabTokenForAllowedHosts();
-  log.info(
-    `Parallel fetch batch size set to ${parallelLimit} (GitHub token=${tokenConfigured ? "yes" : "no"}, Codeberg token=${codebergTokenConfigured ? "yes" : "no"}, GitLab token=${gitlabTokenConfigured ? "yes" : "no"}).`,
+  const updatedRepos = originalRepos.map((repository) => ({
+    ...repository,
+    pendingNotifications: repository.pendingNotifications?.map(
+      (notification) => ({
+        ...notification,
+        channels: [...notification.channels],
+        channelStates: notification.channelStates
+          ? Object.fromEntries(
+              Object.entries(notification.channelStates).map(
+                ([channel, state]) => [channel, { ...state }],
+              ),
+            )
+          : undefined,
+      }),
+    ),
+  }));
+  const repoIndexById = new Map(
+    updatedRepos.map((repo, index) => [repo.id, index]),
   );
-
-  const originalRepos = await getRepositories();
-  if (originalRepos.length === 0) {
-    log.info(`No repositories to check.`);
-    return { notificationsSent: 0, checked: 0 };
-  }
-
-  const reposToCheck = options?.onlyDue
-    ? filterRepositoriesDueForBackgroundCheck(
-        originalRepos,
-        settings,
-        backgroundCheckStartedAt,
-      )
-    : originalRepos;
-
-  if (reposToCheck.length === 0) {
-    log.info(`No repositories are due for background check.`);
-    return { notificationsSent: 0, checked: 0 };
-  }
-
-  // Partition into releases and packages
-  const releaseRepos = reposToCheck.filter((r) => r.type !== "package");
-  const packageRepos = reposToCheck.filter((r) => r.type === "package");
-
-  // Fetch both in parallel
-  const [enrichedReleases, enrichedPackages] = await Promise.all([
-    releaseRepos.length > 0
-      ? getLatestReleasesForRepos(releaseRepos, settings, effectiveLocale, {
-          skipCache: options?.skipCache,
-        })
-      : Promise.resolve([]),
-    packageRepos.length > 0
-      ? getLatestDigestsForPackages(packageRepos, settings)
-      : Promise.resolve([]),
-  ]);
-
-  const updatedRepos = [...originalRepos];
   let changed = false;
-  let notificationsSent = 0;
 
   for (const enrichedRelease of enrichedReleases) {
-    const repoIndex = updatedRepos.findIndex(
-      (r) => r.id === enrichedRelease.repoId,
-    );
-    if (repoIndex === -1) continue;
+    const repoIndex = repoIndexById.get(enrichedRelease.repoId);
+    if (repoIndex === undefined) continue;
 
     const repo = updatedRepos[repoIndex];
     let repoWasUpdated = false;
 
     if (
-      options?.onlyDue &&
+      markDueChecks &&
       repo.lastBackgroundCheckAt !== backgroundCheckStartedAtIso
     ) {
       repo.lastBackgroundCheckAt = backgroundCheckStartedAtIso;
       repoWasUpdated = true;
     }
 
-    if (applyEtagUpdate(repo, enrichedRelease.newEtag)) {
+    if (applyReleaseFetchResultToRepository(repo, enrichedRelease)) {
       repoWasUpdated = true;
     }
 
     if (enrichedRelease.release) {
-      const isVirtual = enrichedRelease.release.id === 0; // tag-fallback or reconstructed data
-      const newCachedRelease = toCachedRelease(enrichedRelease.release);
-
-      // Do not overwrite an existing real release with a virtual one.
-      if (
-        !isVirtual ||
-        canReplaceCachedReleaseWithVirtual(repo.latestRelease)
-      ) {
-        if (
-          JSON.stringify(repo.latestRelease) !==
-          JSON.stringify(newCachedRelease)
-        ) {
-          repoWasUpdated = true;
-        }
-        repo.latestRelease = newCachedRelease;
-      } else if (
-        isVirtual &&
-        repo.latestRelease &&
-        newCachedRelease.fetched_at
-      ) {
-        // Still update the last successful fetch time when ETag says not modified
-        if (repo.latestRelease.fetched_at !== newCachedRelease.fetched_at) {
-          repo.latestRelease.fetched_at = newCachedRelease.fetched_at;
-          repoWasUpdated = true;
-        }
-      }
-
+      const isReconstructed = enrichedRelease.error?.type === "not_modified";
       const newTag = enrichedRelease.release.tag_name;
       const isNewRelease =
-        !isVirtual &&
+        !isReconstructed &&
         repo.lastSeenReleaseTag &&
         repo.lastSeenReleaseTag !== newTag;
 
@@ -139,23 +101,15 @@ async function _checkForNewReleasesUnscheduled(options?: {
         repo.isNew = shouldHighlight;
         repoWasUpdated = true;
 
-        try {
-          await sendNotification(
-            repo,
-            enrichedRelease.release,
-            effectiveLocale,
-            settings,
-          );
-          notificationsSent++;
-        } catch (error: unknown) {
-          const message =
-            error instanceof Error ? error.message : String(error ?? "unknown");
-          log.error(
-            `Failed to send notification for ${repo.id}. The release tag HAS been updated to prevent repeated failures for the same release. Error: ${message}`,
-            error instanceof Error ? error : undefined,
-          );
-        }
-      } else if (!repo.lastSeenReleaseTag && !isVirtual) {
+        enqueuePendingNotification(
+          repo,
+          enrichedRelease.release,
+          effectiveLocale,
+          settings,
+          notificationChannels,
+          notificationBatchId,
+        );
+      } else if (!repo.lastSeenReleaseTag && !isReconstructed) {
         log.info(
           `First fetch for ${repo.id}, setting initial release tag to ${newTag}. No notification will be sent.`,
         );
@@ -169,41 +123,151 @@ async function _checkForNewReleasesUnscheduled(options?: {
     }
   }
 
-  // Process package results
-  for (const enrichedPkg of enrichedPackages) {
-    const repoIndex = updatedRepos.findIndex(
-      (r) => r.id === enrichedPkg.repoId,
-    );
-    if (repoIndex === -1) continue;
+  return { updatedRepos, changed };
+}
 
-    const result = await processPackageChange(
-      enrichedPkg,
-      updatedRepos[repoIndex],
-      settings,
-      effectiveLocale,
-    );
-    if (result.changed) changed = true;
-    if (result.notificationSent) notificationsSent++;
+async function _checkForNewReleasesUnscheduled(options?: {
+  overrideLocale?: Locale;
+  skipCache?: boolean;
+  onlyDue?: boolean;
+}) {
+  log.info(`Running check for new releases...`);
+  const settings = await getSettings();
+  const backgroundCheckStartedAt = new Date();
+  const backgroundCheckStartedAtIso = backgroundCheckStartedAt.toISOString();
+  const effectiveLocale = options?.overrideLocale || settings.locale;
+  const parallelLimit = resolveParallelRepoFetches(settings);
+  const tokenConfigured = !!process.env.GITHUB_ACCESS_TOKEN?.trim();
+  const codebergTokenConfigured = !!process.env.CODEBERG_ACCESS_TOKEN?.trim();
+  const forgejoTokenConfigured = hasAnyForgejoToken();
+  const gitlabTokenConfigured = hasAnyGitlabTokenForAllowedHosts();
+  log.info(
+    `Parallel fetch batch size set to ${parallelLimit} (GitHub token=${tokenConfigured ? "yes" : "no"}, Codeberg token=${codebergTokenConfigured ? "yes" : "no"}, Forgejo token=${forgejoTokenConfigured ? "yes" : "no"}, GitLab token=${gitlabTokenConfigured ? "yes" : "no"}).`,
+  );
+
+  const originalRepos = await getRepositories();
+
+  if (originalRepos.length === 0) {
+    log.info(`No repositories to check.`);
+    return { checked: 0, packageNotificationsSent: 0 };
   }
 
-  if (changed) {
+  const reposToCheck = options?.onlyDue
+    ? filterRepositoriesDueForBackgroundCheck(
+        originalRepos,
+        settings,
+        backgroundCheckStartedAt,
+      )
+    : originalRepos;
+
+  if (reposToCheck.length === 0) {
+    log.info(`No repositories are due for background check.`);
+    return { checked: 0, packageNotificationsSent: 0 };
+  }
+
+  const enrichedReleases = await getLatestReleasesForRepos(
+    reposToCheck,
+    settings,
+    effectiveLocale,
+    { skipCache: options?.skipCache },
+  );
+
+  const notificationChannels = getConfiguredNotificationChannels();
+  const notificationBatchId = crypto.randomUUID();
+  const { updatedRepos, changed } = await applyReleaseCheckResults({
+    originalRepos,
+    enrichedReleases,
+    settings,
+    effectiveLocale,
+    backgroundCheckStartedAtIso,
+    markDueChecks: options?.onlyDue === true,
+    notificationChannels,
+    notificationBatchId,
+  });
+
+  // Package (GHCR) processing — run alongside release processing.
+  const packageRepos = updatedRepos.filter((r) => r.type === "package");
+  let packageChanged = false;
+  let packageNotificationsSent = 0;
+  if (packageRepos.length > 0) {
+    const enrichedPackages = await getLatestDigestsForPackages(
+      packageRepos,
+      settings,
+    );
+    for (const enrichedPkg of enrichedPackages) {
+      const repoIndex = updatedRepos.findIndex(
+        (r) => r.id === enrichedPkg.repoId,
+      );
+      if (repoIndex === -1) continue;
+      const result = await processPackageChange(
+        enrichedPkg,
+        updatedRepos[repoIndex],
+        settings,
+        effectiveLocale,
+      );
+      if (result.changed) packageChanged = true;
+      if (result.notificationSent) packageNotificationsSent++;
+    }
+  }
+  const anyChanged = changed || packageChanged;
+
+  if (anyChanged) {
     log.info(`Found changes, updating repository data file.`);
     await saveRepositories(updatedRepos);
   } else {
     log.info(`No new releases found.`);
   }
-  log.info(
-    `Summary: notificationsSent=${notificationsSent} checked=${reposToCheck.length}`,
-  );
-  return { notificationsSent, checked: reposToCheck.length };
+
+  return { checked: reposToCheck.length, packageNotificationsSent };
+}
+
+const NOTIFICATION_DELIVERY_QUEUE = "notification-delivery";
+
+function processPendingNotifications(): Promise<number> {
+  return scheduleProcessTask(NOTIFICATION_DELIVERY_QUEUE, async () => {
+    // Network delivery deliberately happens outside the shared state scheduler.
+    // Only the short merge/write phase is serialized with other state changes.
+    const now = new Date();
+    const [snapshot, settings] = await Promise.all([
+      getRepositories(),
+      getSettings(),
+    ]);
+    const prunedSnapshot = pruneAbandonedNotifications(snapshot, now);
+    const delivery = await attemptPendingNotifications(
+      prunedSnapshot.repositories,
+      now,
+      settings,
+    );
+    if (prunedSnapshot.changed || delivery.outcomes.length > 0) {
+      await scheduleTask("persistNotificationDeliveryResults", async () => {
+        const currentRepositories = await getRepositories();
+        const applied = applyPendingNotificationDeliveryOutcomes(
+          currentRepositories,
+          delivery.outcomes,
+        );
+        const pruned = pruneAbandonedNotifications(applied.repositories, now);
+        if (applied.changed || pruned.changed) {
+          await saveRepositories(pruned.repositories);
+        }
+      });
+    }
+    return delivery.notificationsSent;
+  });
 }
 
 export async function checkForNewReleases(options?: {
-  overrideLocale?: string;
+  overrideLocale?: Locale;
   skipCache?: boolean;
   onlyDue?: boolean;
 }) {
-  return scheduleTask("checkForNewReleases", () =>
+  const result = await scheduleTask("checkForNewReleases", () =>
     _checkForNewReleasesUnscheduled(options),
   );
+  const pendingSent = await processPendingNotifications();
+  const notificationsSent =
+    pendingSent + (result.packageNotificationsSent ?? 0);
+  log.info(
+    `Summary: notificationsSent=${notificationsSent} checked=${result.checked}`,
+  );
+  return { checked: result.checked, notificationsSent };
 }

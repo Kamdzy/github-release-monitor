@@ -1,5 +1,6 @@
 import { unstable_cache } from "next/cache";
 import { fetchLatestReleaseFromCodeberg } from "@/lib/releases/codeberg";
+import { fetchLatestReleaseFromForgejo } from "@/lib/releases/forgejo";
 import { fetchLatestReleaseFromGitHub } from "@/lib/releases/github";
 import { fetchLatestReleaseFromGitLab } from "@/lib/releases/gitlab";
 import type {
@@ -8,16 +9,16 @@ import type {
 } from "@/lib/releases/types";
 import type { RepoProvider } from "@/lib/repositories/providers";
 import { getEffectiveCacheIntervalMinutes } from "@/lib/runtime/repository-schedule";
-import type { AppSettings } from "@/types";
+import type { AppSettings, Locale } from "@/types";
 
 export async function fetchLatestReleaseWithCache(
   provider: RepoProvider,
-  providerHost: string | undefined,
+  providerLocation: string | undefined,
   owner: string,
   repo: string,
   repoSettings: RepoSettingsForFetch,
   globalSettings: AppSettings,
-  locale: string,
+  locale: Locale,
   options?: { skipCache?: boolean },
 ): Promise<LatestReleaseFetchResult> {
   const fetcher =
@@ -29,17 +30,33 @@ export async function fetchLatestReleaseWithCache(
             repoArg: string,
             repoSettingsArg: RepoSettingsForFetch,
             globalSettingsArg: AppSettings,
-            localeArg: string,
+            localeArg: Locale,
           ) =>
             fetchLatestReleaseFromGitLab(
-              providerHost ?? "gitlab.com",
+              providerLocation ?? "gitlab.com",
               ownerArg,
               repoArg,
               repoSettingsArg,
               globalSettingsArg,
               localeArg,
             )
-        : fetchLatestReleaseFromCodeberg;
+        : provider === "forgejo"
+          ? (
+              ownerArg: string,
+              repoArg: string,
+              repoSettingsArg: RepoSettingsForFetch,
+              globalSettingsArg: AppSettings,
+              localeArg: Locale,
+            ) =>
+              fetchLatestReleaseFromForgejo(
+                providerLocation ?? "",
+                ownerArg,
+                repoArg,
+                repoSettingsArg,
+                globalSettingsArg,
+                localeArg,
+              )
+          : fetchLatestReleaseFromCodeberg;
 
   const cacheIntervalMinutes = getEffectiveCacheIntervalMinutes(
     repoSettings,
@@ -58,20 +75,28 @@ export async function fetchLatestReleaseWithCache(
     repoSettings.releasesPerPage <= 1000
       ? repoSettings.releasesPerPage
       : globalSettings.releasesPerPage;
+  const effectiveReleaseSelectionStrategy =
+    repoSettings.releaseSelectionStrategy ??
+    globalSettings.releaseSelectionStrategy ??
+    "newest";
 
   const cacheKeyPrefix =
     provider === "github"
       ? "github-release"
       : provider === "gitlab"
-        ? `gitlab-release-${providerHost ?? "gitlab.com"}`
-        : "codeberg-release";
+        ? `gitlab-release-${providerLocation ?? "gitlab.com"}`
+        : provider === "forgejo"
+          ? `forgejo-release-${providerLocation ?? "invalid"}`
+          : "codeberg-release";
 
   const cacheTag =
     provider === "github"
       ? "github-releases"
       : provider === "gitlab"
         ? "gitlab-releases"
-        : "codeberg-releases";
+        : provider === "forgejo"
+          ? "forgejo-releases"
+          : "codeberg-releases";
 
   const cachedFetch = unstable_cache(
     (
@@ -100,22 +125,32 @@ export async function fetchLatestReleaseWithCache(
               globalSettingsArg,
               localeArg,
             )
-          : fetchLatestReleaseFromCodeberg(
-              ownerArg,
-              repoArg,
-              repoSettingsArg,
-              globalSettingsArg,
-              localeArg,
-            ),
+          : providerArg === "forgejo"
+            ? fetchLatestReleaseFromForgejo(
+                providerHostArg,
+                ownerArg,
+                repoArg,
+                repoSettingsArg,
+                globalSettingsArg,
+                localeArg,
+              )
+            : fetchLatestReleaseFromCodeberg(
+                ownerArg,
+                repoArg,
+                repoSettingsArg,
+                globalSettingsArg,
+                localeArg,
+              ),
     [
       cacheKeyPrefix,
       provider,
-      providerHost ?? "gitlab.com",
+      providerLocation ?? (provider === "gitlab" ? "gitlab.com" : ""),
       owner,
       repo,
       locale,
       JSON.stringify(repoSettings),
       String(effectiveReleasesPerPage),
+      effectiveReleaseSelectionStrategy,
       String(cacheIntervalMinutes),
     ],
     {
@@ -126,7 +161,7 @@ export async function fetchLatestReleaseWithCache(
 
   return cachedFetch(
     provider,
-    providerHost ?? "gitlab.com",
+    providerLocation ?? (provider === "gitlab" ? "gitlab.com" : ""),
     owner,
     repo,
     repoSettings,

@@ -13,6 +13,10 @@ vi.mock("next-intl/server", () => ({
   getLocale: async () => "en",
 }));
 
+vi.mock("@/lib/releases", () => ({
+  getLatestReleasesForRepos: async () => [],
+}));
+
 const mem: { repos: Repository[] } = { repos: [] };
 vi.mock("@/lib/storage/repositories", () => ({
   getRepositories: async () => mem.repos,
@@ -40,6 +44,26 @@ describe("addRepositoriesAction parses and adds valid URLs", () => {
     expect(mem.repos.map((r) => r.id).sort()).toEqual([
       "github:owner1/repo1",
       "github:owner2/repo2",
+    ]);
+  });
+
+  it("applies and normalizes selected tags to every newly added repository", async () => {
+    const { addRepositoriesAction } = await import("@/app/actions");
+    const fd = new FormData();
+    fd.set(
+      "urls",
+      "https://github.com/owner1/repo1\nhttps://github.com/owner2/repo2",
+    );
+    fd.append("tags", " Infra ");
+    fd.append("tags", "MEDIA");
+    fd.append("tags", "infra");
+
+    const result = await addRepositoriesAction({}, fd);
+
+    expect(result.success).toBe(true);
+    expect(mem.repos.map((repository) => repository.tags)).toEqual([
+      ["infra", "media"],
+      ["infra", "media"],
     ]);
   });
 });

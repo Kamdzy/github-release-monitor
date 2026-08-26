@@ -5,7 +5,7 @@ import type { GithubRelease } from "@/types";
 function release(overrides: Partial<GithubRelease>): GithubRelease {
   return {
     id: 1,
-    html_url: "https://example.com/release",
+    html_url: "https://example.test/release",
     tag_name: "v1.0.0",
     name: "v1.0.0",
     body: null,
@@ -41,5 +41,46 @@ describe("isSecurityRelease", () => {
       ),
     ).toBe(false);
     expect(isSecurityRelease(undefined)).toBe(false);
+  });
+
+  it("detects custom keyword and regex indicators", () => {
+    expect(
+      isSecurityRelease(release({ body: "Contains a breaking auth fix." }), {
+        customSecurityPatterns: "breaking",
+      }),
+    ).toBe(true);
+    expect(
+      isSecurityRelease(release({ name: "Auth hardening" }), {
+        customSecurityPatterns: "/hardening/i",
+      }),
+    ).toBe(true);
+  });
+
+  it("can disable default indicators and use only custom patterns", () => {
+    expect(
+      isSecurityRelease(release({ name: "Security update" }), {
+        includeDefaultSecurityPatterns: false,
+      }),
+    ).toBe(false);
+    expect(
+      isSecurityRelease(release({ name: "Security update" }), {
+        includeDefaultSecurityPatterns: false,
+        customSecurityPatterns: "security",
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores invalid custom regex without crashing", () => {
+    expect(
+      isSecurityRelease(release({ name: "Security update" }), {
+        customSecurityPatterns: "/[/",
+      }),
+    ).toBe(true);
+    expect(
+      isSecurityRelease(release({ name: "v1.2.3" }), {
+        includeDefaultSecurityPatterns: false,
+        customSecurityPatterns: "/[/",
+      }),
+    ).toBe(false);
   });
 });

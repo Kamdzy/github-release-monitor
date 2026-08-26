@@ -2,6 +2,8 @@
 
 import type { AppSettings, Repository } from "@/types";
 
+const checkForNewReleasesMock = vi.hoisted(() => vi.fn());
+
 vi.mock("next/cache", () => ({
   revalidatePath: () => {},
   updateTag: () => {},
@@ -15,6 +17,10 @@ vi.mock("next-intl/server", () => ({
 
 vi.mock("next/headers", () => ({
   cookies: async () => ({ set: vi.fn() }),
+}));
+
+vi.mock("@/lib/releases/checker", () => ({
+  checkForNewReleases: checkForNewReleasesMock,
 }));
 
 const memRepos: { list: Repository[] } = { list: [] };
@@ -43,6 +49,7 @@ vi.mock("@/lib/storage/repositories", () => ({
 
 vi.mock("@/lib/storage/settings", () => ({
   getSettings: async () => settingsStore.current,
+  normalizeSettings: (settings: AppSettings) => settings,
   saveSettings: async (s: AppSettings) => {
     settingsStore.current = JSON.parse(JSON.stringify(s));
   },
@@ -51,6 +58,9 @@ vi.mock("@/lib/storage/settings", () => ({
 describe("settings actions", () => {
   beforeEach(() => {
     vi.resetModules();
+    checkForNewReleasesMock
+      .mockReset()
+      .mockResolvedValue({ notificationsSent: 0 });
     memRepos.list = [];
     settingsStore.current = {
       timeFormat: "24h",
@@ -73,18 +83,6 @@ describe("settings actions", () => {
       { id: "o/b", url: "https://github.com/o/b", etag: "E2", isNew: true },
     ];
 
-    // Spy checkForNewReleases
-    vi.doMock("@/app/actions", async () => {
-      const actual =
-        await vi.importActual<typeof import("@/app/actions")>("@/app/actions");
-      return {
-        ...actual,
-        checkForNewReleases: vi
-          .fn()
-          .mockResolvedValue({ notificationsSent: 0 }),
-      };
-    });
-
     const { updateSettingsAction } = await import("@/app/settings/actions");
     await updateSettingsAction({
       ...settingsStore.current,
@@ -98,6 +96,115 @@ describe("settings actions", () => {
     // isNew flags reset due to disabling acknowledge
     expect(memRepos.list[0].isNew).toBe(false);
     expect(memRepos.list[1].isNew).toBe(false);
+  });
+
+  it("merges settings patches into the latest persisted state", async () => {
+    const { updateSettingsPatchAction } = await import(
+      "@/app/settings/actions"
+    );
+
+    const first = updateSettingsPatchAction({ releaseSortOrder: "repo_az" });
+    const second = updateSettingsPatchAction({
+      repositoryFormExpanded: false,
+    });
+    await Promise.all([first, second]);
+
+    expect(settingsStore.current.releaseSortOrder).toBe("repo_az");
+    expect(settingsStore.current.repositoryFormExpanded).toBe(false);
+    expect(settingsStore.current.refreshInterval).toBe(10);
+  });
+
+  it("rebaselines only repositories inheriting a changed release selection", async () => {
+    memRepos.list = [
+      {
+        id: "o/inherited",
+        url: "https://github.com/o/inherited",
+        etag: "E1",
+        lastSeenReleaseTag: "v1.0.0",
+        isNew: true,
+      },
+      {
+        id: "o/override",
+        url: "https://github.com/o/override",
+        etag: "E2",
+        lastSeenReleaseTag: "v2.0.0",
+        isNew: true,
+        releaseSelectionStrategy: "newest",
+      },
+    ];
+    const { updateSettingsAction } = await import("@/app/settings/actions");
+
+    await updateSettingsAction({
+      ...settingsStore.current,
+      releaseSelectionStrategy: "highest_version",
+    });
+
+    expect(memRepos.list[0]).toMatchObject({ isNew: false });
+    expect(memRepos.list[0].lastSeenReleaseTag).toBeUndefined();
+    expect(memRepos.list[0].etag).toBeUndefined();
+    expect(memRepos.list[1].lastSeenReleaseTag).toBe("v2.0.0");
+    expect(memRepos.list[1].isNew).toBe(true);
+    expect(memRepos.list[1].etag).toBe("E2");
+  });
+
+  it("rejects invalid release regexes before persisting settings", async () => {
+    const { updateSettingsAction } = await import("@/app/settings/actions");
+    const previousSettings = structuredClone(settingsStore.current);
+
+    const result = await updateSettingsAction({
+      ...settingsStore.current,
+      includeRegex: "([",
+    });
+
+    expect(result).toEqual({
+      success: false,
+      message: {
+        title: "toast_error_title",
+        description: "regex_error_invalid",
+      },
+    });
+    expect(settingsStore.current).toEqual(previousSettings);
+  });
+
+  it("returns invalid custom pre-release marker values", async () => {
+    const { updateSettingsAction } = await import("@/app/settings/actions");
+    const previousSettings = structuredClone(settingsStore.current);
+
+    const result = await updateSettingsAction({
+      ...settingsStore.current,
+      customPreReleaseMarkers: [".", "Edge3"],
+    });
+
+    expect(result).toEqual({
+      success: false,
+      message: {
+        title: "toast_error_title",
+        description: "custom_prerelease_markers_error_invalid ., Edge3",
+      },
+    });
+    expect(settingsStore.current).toEqual(previousSettings);
+  });
+
+  it("does not mutate repositories when settings validation fails", async () => {
+    memRepos.list = [
+      {
+        id: "o/a",
+        url: "https://github.com/o/a",
+        etag: "E1",
+        isNew: true,
+      },
+    ];
+    const previousRepositories = structuredClone(memRepos.list);
+    const { updateSettingsAction } = await import("@/app/settings/actions");
+
+    const result = await updateSettingsAction({
+      ...settingsStore.current,
+      includeRegex: "([",
+      showAcknowledge: false,
+    });
+
+    expect(result.success).toBe(false);
+    expect(memRepos.list).toEqual(previousRepositories);
   });
 
   it("deleteAllRepositoriesAction clears storage and returns success", async () => {

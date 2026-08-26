@@ -4,6 +4,9 @@ export type RepoSettingsForFetch = Pick<
   Repository,
   | "releaseChannels"
   | "preReleaseSubChannels"
+  | "customPreReleaseMarkers"
+  | "releaseSelectionStrategy"
+  | "versionTagPattern"
   | "releasesPerPage"
   | "cacheInterval"
   | "includeRegex"

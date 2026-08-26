@@ -24,49 +24,18 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth/client";
-
-type TwoFactorEnableData = {
-  totpURI: string | null;
-  backupCodes: string[];
-};
-
-function normalizeEnableResponse(payload: unknown): TwoFactorEnableData {
-  const data = (payload as { data?: unknown } | null)?.data;
-  const source =
-    data && typeof data === "object"
-      ? (data as Record<string, unknown>)
-      : payload && typeof payload === "object"
-        ? (payload as Record<string, unknown>)
-        : {};
-
-  const rawTotp =
-    source.totpURI ??
-    source.totpUri ??
-    source.totp_url ??
-    source.uri ??
-    source.otpauthURL;
-  const totpURI =
-    typeof rawTotp === "string" && rawTotp.trim() ? rawTotp.trim() : null;
-
-  const rawCodes = source.backupCodes;
-  const backupCodes = Array.isArray(rawCodes)
-    ? rawCodes
-        .map((value) => (typeof value === "string" ? value.trim() : ""))
-        .filter(Boolean)
-    : [];
-
-  return { totpURI, backupCodes };
-}
+import {
+  disableTwoFactor,
+  enableTwoFactor,
+  readAuthSessionSnapshot,
+  verifyTwoFactor,
+} from "@/lib/auth/client-adapters";
 
 export function TwoFactorSettingsCard() {
   const t = useTranslations("SettingsPage");
   const sessionState = authClient.useSession();
-  const sessionData = (sessionState as { data?: unknown }).data as
-    | { user?: { twoFactorEnabled?: unknown } }
-    | undefined;
-  const sessionLoading = Boolean(
-    (sessionState as { isPending?: unknown }).isPending,
-  );
+  const session = readAuthSessionSnapshot(sessionState);
+  const sessionLoading = session.isPending;
 
   const [enabledOverride, setEnabledOverride] = React.useState<boolean | null>(
     null,
@@ -91,7 +60,7 @@ export function TwoFactorSettingsCard() {
   const verifyCodeId = React.useId();
   const disablePasswordId = React.useId();
 
-  const sessionEnabled = Boolean(sessionData?.user?.twoFactorEnabled);
+  const sessionEnabled = session.twoFactorEnabled;
   const twoFactorEnabled =
     enabledOverride === null ? sessionEnabled : enabledOverride;
   const inSetupFlow = Boolean(pendingTotpUri);
@@ -147,16 +116,8 @@ export function TwoFactorSettingsCard() {
     setErrorKey(null);
     setCopied(false);
     try {
-      const result = await authClient.twoFactor.enable({
-        password: enablePassword,
-      });
-      if (result.error) {
-        setErrorKey("two_factor_error_enable");
-        return;
-      }
-
-      const normalized = normalizeEnableResponse(result);
-      if (!normalized.totpURI) {
+      const normalized = await enableTwoFactor(enablePassword);
+      if (!normalized?.totpURI) {
         setErrorKey("two_factor_error_enable");
         return;
       }
@@ -175,11 +136,7 @@ export function TwoFactorSettingsCard() {
     setVerifying(true);
     setErrorKey(null);
     try {
-      const result = await authClient.twoFactor.verifyTotp({
-        code: verifyCode.trim(),
-        trustDevice: true,
-      });
-      if (result.error) {
+      if (!(await verifyTwoFactor(verifyCode.trim(), true))) {
         setErrorKey("two_factor_error_verify");
         return;
       }
@@ -201,10 +158,7 @@ export function TwoFactorSettingsCard() {
     setDisabling(true);
     setErrorKey(null);
     try {
-      const result = await authClient.twoFactor.disable({
-        password: disablePassword,
-      });
-      if (result.error) {
+      if (!(await disableTwoFactor(disablePassword))) {
         setErrorKey("two_factor_error_disable");
         return;
       }
@@ -263,12 +217,13 @@ export function TwoFactorSettingsCard() {
               <div className="relative grow">
                 <Input
                   id={enablePasswordId}
+                  dir="ltr"
                   type={passwordInputType}
                   value={enablePassword}
                   onChange={(event) => setEnablePassword(event.target.value)}
                   placeholder={t("two_factor_enable_password_placeholder")}
                   autoComplete="current-password"
-                  className="pr-10"
+                  className="pe-10"
                 />
                 <Button
                   type="button"
@@ -299,9 +254,9 @@ export function TwoFactorSettingsCard() {
                 aria-busy={enabling}
               >
                 {enabling ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  <Loader2 className="me-2 h-4 w-4 animate-spin" />
                 ) : (
-                  <ShieldCheck className="mr-2 h-4 w-4" />
+                  <ShieldCheck className="me-2 h-4 w-4" />
                 )}
                 {t("two_factor_enable_button")}
               </Button>
@@ -346,6 +301,7 @@ export function TwoFactorSettingsCard() {
               <Label>{t("two_factor_setup_uri_label")}</Label>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Input
+                  dir="ltr"
                   value={pendingTotpUri ?? ""}
                   readOnly
                   className="font-mono text-xs"
@@ -355,7 +311,7 @@ export function TwoFactorSettingsCard() {
                   variant="outline"
                   onClick={() => void handleCopyOtpUri()}
                 >
-                  <Copy className="mr-2 h-4 w-4" />
+                  <Copy className="me-2 h-4 w-4" />
                   {copied
                     ? t("two_factor_uri_copied")
                     : t("two_factor_copy_uri_button")}
@@ -365,7 +321,10 @@ export function TwoFactorSettingsCard() {
             {backupCodes.length > 0 && (
               <div className="space-y-2">
                 <Label>{t("two_factor_backup_codes_label")}</Label>
-                <div className="grid grid-cols-1 gap-1 rounded-md border p-2 font-mono text-xs sm:grid-cols-2">
+                <div
+                  dir="ltr"
+                  className="grid grid-cols-1 gap-1 rounded-md border p-2 font-mono text-xs sm:grid-cols-2"
+                >
                   {backupCodes.map((code) => (
                     <span key={code}>{code}</span>
                   ))}
@@ -395,9 +354,9 @@ export function TwoFactorSettingsCard() {
                   aria-busy={verifying}
                 >
                   {verifying ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Loader2 className="me-2 h-4 w-4 animate-spin" />
                   ) : (
-                    <KeyRound className="mr-2 h-4 w-4" />
+                    <KeyRound className="me-2 h-4 w-4" />
                   )}
                   {t("two_factor_verify_button")}
                 </Button>
@@ -415,12 +374,13 @@ export function TwoFactorSettingsCard() {
               <div className="relative grow">
                 <Input
                   id={disablePasswordId}
+                  dir="ltr"
                   type={passwordInputType}
                   value={disablePassword}
                   onChange={(event) => setDisablePassword(event.target.value)}
                   placeholder={t("two_factor_disable_password_placeholder")}
                   autoComplete="current-password"
-                  className="pr-10"
+                  className="pe-10"
                 />
                 <Button
                   type="button"
@@ -448,9 +408,9 @@ export function TwoFactorSettingsCard() {
                 aria-busy={disabling}
               >
                 {disabling ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  <Loader2 className="me-2 h-4 w-4 animate-spin" />
                 ) : (
-                  <ShieldOff className="mr-2 h-4 w-4" />
+                  <ShieldOff className="me-2 h-4 w-4" />
                 )}
                 {t("two_factor_disable_button")}
               </Button>

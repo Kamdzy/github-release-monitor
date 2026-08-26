@@ -1,16 +1,12 @@
 import { getTranslations } from "next-intl/server";
-import { getUpdateNotificationState } from "@/app/actions";
-import { AccountCredentialsSettingsCard } from "@/components/account-credentials-settings-card";
 import { Header } from "@/components/header";
 import { OfflineInlineNotice } from "@/components/offline-inline-notice";
-import { PasskeySettingsCard } from "@/components/passkey-settings-card";
-import {
-  SettingsDangerZoneCard,
-  SettingsForm,
-} from "@/components/settings-form";
-import { SocialAccountsSettingsCard } from "@/components/social-accounts-settings-card";
-import { TwoFactorSettingsCard } from "@/components/two-factor-settings-card";
+import { SettingsPageContent } from "@/components/settings-page-content";
+import { normalizeLocale } from "@/i18n/config";
 import { getCurrentAuthAccess } from "@/lib/auth/access";
+import { getAuthFeatureConfig } from "@/lib/auth/config";
+import { getNotificationRuntimeConfig } from "@/lib/notifications/config";
+import { getUpdateNotificationStateOrFallback } from "@/lib/runtime/app-update-notice";
 import { getSettings } from "@/lib/storage/settings";
 import type { AppSettings } from "@/types";
 
@@ -20,36 +16,31 @@ export default async function SettingsPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
+  const appLocale = normalizeLocale(locale);
   const t = await getTranslations({
-    locale: locale,
+    locale: appLocale,
     namespace: "SettingsPage",
   });
-  const currentSettings: AppSettings = await getSettings();
-  const isAppriseConfigured = !!process.env.APPRISE_URL;
+  const { isAppriseConfigured } = getNotificationRuntimeConfig();
   const isGithubTokenSet = !!process.env.GITHUB_ACCESS_TOKEN?.trim();
-  const isPasskeyEnabled = process.env.AUTH_ENABLE_PASSKEY !== "false";
-  const enabledSocialProviders: Array<"github" | "google"> = [];
-  if (
-    process.env.AUTH_GITHUB_CLIENT_ID?.trim() &&
-    process.env.AUTH_GITHUB_CLIENT_SECRET?.trim()
-  ) {
-    enabledSocialProviders.push("github");
-  }
-  if (
-    process.env.AUTH_GOOGLE_CLIENT_ID?.trim() &&
-    process.env.AUTH_GOOGLE_CLIENT_SECRET?.trim()
-  ) {
-    enabledSocialProviders.push("google");
-  }
-  const updateNotice = await getUpdateNotificationState();
-  const authAccess = await getCurrentAuthAccess();
+  const { passkeyEnabled: isPasskeyEnabled, enabledSocialProviders } =
+    getAuthFeatureConfig();
+  const [currentSettings, updateNotice, authAccess]: [
+    AppSettings,
+    Awaited<ReturnType<typeof getUpdateNotificationStateOrFallback>>,
+    Awaited<ReturnType<typeof getCurrentAuthAccess>>,
+  ] = await Promise.all([
+    getSettings(),
+    getUpdateNotificationStateOrFallback(),
+    getCurrentAuthAccess(),
+  ]);
   const showInternalAuthSettings =
     authAccess.authenticationMethod !== "External";
 
   return (
     <div className="min-h-screen w-full bg-background text-foreground">
       <Header
-        locale={locale}
+        locale={appLocale}
         updateNotice={updateNotice}
         authAccess={authAccess}
       />
@@ -60,24 +51,14 @@ export default async function SettingsPage({
           </h2>
           <OfflineInlineNotice />
           <div className="h-2" />
-          <SettingsForm
+          <SettingsPageContent
             currentSettings={currentSettings}
+            enabledSocialProviders={enabledSocialProviders}
             isAppriseConfigured={isAppriseConfigured}
             isGithubTokenSet={isGithubTokenSet}
+            isPasskeyEnabled={isPasskeyEnabled}
+            showInternalAuthSettings={showInternalAuthSettings}
           />
-          {showInternalAuthSettings && (
-            <>
-              <AccountCredentialsSettingsCard />
-              <TwoFactorSettingsCard />
-              {isPasskeyEnabled && <PasskeySettingsCard />}
-              {enabledSocialProviders.length > 0 && (
-                <SocialAccountsSettingsCard
-                  enabledSocialProviders={enabledSocialProviders}
-                />
-              )}
-            </>
-          )}
-          <SettingsDangerZoneCard />
         </div>
       </main>
     </div>

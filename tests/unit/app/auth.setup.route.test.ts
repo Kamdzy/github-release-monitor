@@ -15,7 +15,12 @@ vi.mock("@/lib/auth", () => ({
 const isAuthSetupLockedMock = vi.fn(async () => false);
 const writeAuthSetupLockMock = vi.fn(async () => "created" as const);
 const releaseAuthSetupBootstrapLockMock = vi.fn(async () => undefined);
-const acquireAuthSetupBootstrapLockMock = vi.fn(async () => ({
+type AuthSetupBootstrapLock =
+  | { status: "acquired"; release: typeof releaseAuthSetupBootstrapLockMock }
+  | { status: "busy"; release: typeof releaseAuthSetupBootstrapLockMock };
+const acquireAuthSetupBootstrapLockMock = vi.fn<
+  (_options?: unknown) => Promise<AuthSetupBootstrapLock>
+>(async () => ({
   status: "acquired" as const,
   release: releaseAuthSetupBootstrapLockMock,
 }));
@@ -136,7 +141,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         name: "Admin",
         username: "admin",
@@ -148,7 +153,7 @@ describe("auth setup route", () => {
     expect(signUpEmailMock).toHaveBeenCalledWith(
       expect.objectContaining({
         body: {
-          email: "admin@example.com",
+          email: "admin@example.test",
           password: "SuperSecurePass123",
           name: "Admin",
           username: "admin",
@@ -158,7 +163,7 @@ describe("auth setup route", () => {
     );
     expect(writeAuthSetupLockMock).toHaveBeenCalledWith({
       reason: "setup_completed",
-      email: "admin@example.com",
+      email: "admin@example.test",
       source: "/api/auth/setup",
     });
     expect(acquireAuthSetupBootstrapLockMock).toHaveBeenCalledWith({
@@ -172,7 +177,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         name: "Admin",
         username: "admin",
@@ -183,7 +188,7 @@ describe("auth setup route", () => {
     expect(signUpEmailMock).toHaveBeenCalledWith(
       expect.objectContaining({
         body: {
-          email: "admin@example.com",
+          email: "admin@example.test",
           password: "SuperSecurePass123",
           name: "Admin",
           username: "admin",
@@ -197,7 +202,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         name: "Admin",
       }),
@@ -215,7 +220,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin-user",
       }),
@@ -233,7 +238,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "lowercaseonly12",
         username: "admin",
       }),
@@ -245,6 +250,27 @@ describe("auth setup route", () => {
     });
     expect(signUpEmailMock).not.toHaveBeenCalled();
   });
+
+  it.each([" SuperSecurePass123 ", "Super SecurePass123"])(
+    "POST: rejects password whitespace without normalizing it: %j",
+    async (password) => {
+      const { POST } = await import("@/app/api/auth/setup/route");
+      const response = await POST(
+        setupRequest({
+          token: process.env.AUTH_SETUP_TOKEN,
+          email: "admin@example.test",
+          password,
+          username: "admin",
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_password_policy",
+      });
+      expect(signUpEmailMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("POST: maps Better Auth duplicate email errors to email_already_exists", async () => {
     signUpEmailMock.mockResolvedValue(
@@ -264,7 +290,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),
@@ -283,7 +309,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),
@@ -301,7 +327,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),
@@ -325,7 +351,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),
@@ -348,7 +374,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),
@@ -372,7 +398,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),
@@ -393,7 +419,7 @@ describe("auth setup route", () => {
     const response = await POST(
       setupRequest({
         token: process.env.AUTH_SETUP_TOKEN,
-        email: "admin@example.com",
+        email: "admin@example.test",
         password: "SuperSecurePass123",
         username: "admin",
       }),

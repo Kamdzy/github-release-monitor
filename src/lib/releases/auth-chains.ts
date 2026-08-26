@@ -56,7 +56,7 @@ export function buildGitlabAuthChain(
   return chain;
 }
 
-export function buildCodebergAuthChain(
+export function buildForgejoAuthChain(
   headersWithoutAuth: Record<string, string>,
   authToken: string | null,
 ): Array<{ mode: AuthMode; options: RequestInit }> {
@@ -87,7 +87,10 @@ export function buildCodebergAuthChain(
 
   chain.push({
     mode: "none",
-    options: { headers: headersWithoutAuth, cache: "no-store" },
+    options: {
+      headers: headersWithoutAuth,
+      cache: "no-store",
+    },
   });
 
   return chain;

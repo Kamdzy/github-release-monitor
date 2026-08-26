@@ -1,15 +1,16 @@
 "use client";
 
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, LayoutGrid, List } from "lucide-react";
 import { useTranslations } from "next-intl";
 import * as React from "react";
-import { updateSettingsAction } from "@/app/settings/actions";
 import { EmptyState } from "@/components/empty-state";
 import { ExportButton } from "@/components/export-button";
-import { RefreshButton } from "@/components/refresh-button";
 import { PackageCard } from "@/components/package-card";
+import { RefreshButton } from "@/components/refresh-button";
 import { ReleaseCard } from "@/components/release-card";
 import { RepositoryForm } from "@/components/repository-form";
+import { RepositoryTagFilter } from "@/components/repository-tag-filter";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -17,13 +18,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useToast } from "@/hooks/use-toast";
+import { useBrowserTimeZone } from "@/hooks/use-browser-time-zone";
+import { useOptimisticSettingsPatch } from "@/hooks/use-optimistic-settings-patch";
+import { useReleaseViewMode } from "@/hooks/use-release-view-mode";
+import type { Locale } from "@/i18n/config";
+import { formatAbsoluteDateTime } from "@/lib/date-time";
 import {
   normalizeReleaseSortOrder,
   sortEnrichedReleases,
 } from "@/lib/release-sort";
+import type { ReleaseViewMode } from "@/lib/release-view-mode";
+import { repositoryMatchesTagFilter } from "@/lib/repositories/tags";
 import { isSecurityRelease } from "@/lib/security-release";
-import { reloadIfServerActionStale } from "@/lib/server-action-error";
 import type {
   AppSettings,
   EnrichedRelease,
@@ -40,8 +46,10 @@ interface HomePageClientProps {
   generalError: string | null;
   errorSummary: Map<Exclude<FetchError["type"], "not_modified">, number> | null;
   lastUpdated: Date;
-  locale: string;
+  locale: Locale;
+  initialViewMode: ReleaseViewMode;
   canMutate?: boolean;
+  isAppriseConfigured?: boolean;
 }
 
 // Helper to get the translation key for a specific error type.
@@ -52,6 +60,7 @@ function getErrorTranslationKey(
     repo_not_found: "error_repo_not_found",
     no_releases_found: "error_no_releases_found",
     no_matching_releases: "error_no_matching_releases",
+    no_matching_version_tags: "error_no_matching_version_tags",
     invalid_url: "error_invalid_url",
     api_error: "error_generic_fetch",
     rate_limit: "error_rate_limit",
@@ -69,147 +78,237 @@ export function HomePageClient({
   errorSummary,
   lastUpdated,
   locale,
+  initialViewMode,
   canMutate = true,
+  isAppriseConfigured = false,
 }: HomePageClientProps) {
   const t = useTranslations("HomePage");
   const tActions = useTranslations("Actions");
-  const { toast } = useToast();
+  const browserTimeZone = useBrowserTimeZone();
 
   const [formattedLastUpdated, setFormattedLastUpdated] = React.useState("");
-  const [releaseSortOrder, setReleaseSortOrder] =
-    React.useState<ReleaseSortOrder>(
-      normalizeReleaseSortOrder(settings.releaseSortOrder),
-    );
-  const [isSortSaving, startSortSavingTransition] = React.useTransition();
-  const [repositoryFormExpanded, setRepositoryFormExpanded] =
-    React.useState<boolean>(settings.repositoryFormExpanded ?? true);
-  const [isRepositoryFormSaving, startRepositoryFormSavingTransition] =
-    React.useTransition();
+  const [repositoryTagsById, setRepositoryTagsById] = React.useState(
+    () =>
+      new Map(
+        repositories.map((repository) => [
+          repository.id,
+          repository.tags ?? [],
+        ]),
+      ),
+  );
+  const [repositoryPinnedById, setRepositoryPinnedById] = React.useState(
+    () =>
+      new Map(
+        repositories.map((repository) => [
+          repository.id,
+          repository.isPinned === true,
+        ]),
+      ),
+  );
+  const [selectedTags, setSelectedTags] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const [includeUntagged, setIncludeUntagged] = React.useState(false);
+  const [openRepositorySettings, setOpenRepositorySettings] = React.useState<
+    Set<string>
+  >(() => new Set());
+  const { updateViewMode, viewMode } = useReleaseViewMode(initialViewMode);
+  const sortSetting = useOptimisticSettingsPatch<ReleaseSortOrder>({
+    canMutate,
+    serverValue: normalizeReleaseSortOrder(settings.releaseSortOrder),
+    createPatch: (releaseSortOrder) => ({ releaseSortOrder }),
+    unexpectedError: {
+      title: t("sort_save_error_title"),
+      description: t("sort_save_error_description"),
+    },
+  });
+  const repositoryFormSetting = useOptimisticSettingsPatch<boolean>({
+    canMutate,
+    serverValue: settings.repositoryFormExpanded ?? true,
+    createPatch: (repositoryFormExpanded) => ({ repositoryFormExpanded }),
+    unexpectedError: {
+      title: t("repository_form_toggle_save_error_title"),
+      description: t("repository_form_toggle_save_error_description"),
+    },
+  });
 
   React.useEffect(() => {
-    // This effect runs only on the client, after the initial render.
-    // This prevents the hydration mismatch between server and client time.
+    if (!browserTimeZone) return;
     setFormattedLastUpdated(
-      lastUpdated.toLocaleTimeString(locale, {
-        hour12: settings.timeFormat === "12h",
+      formatAbsoluteDateTime(lastUpdated, {
+        locale,
+        timeFormat: settings.timeFormat,
+        timeZone: browserTimeZone,
+        format: {
+          hour: "numeric",
+          minute: "2-digit",
+          second: "2-digit",
+        },
       }),
     );
-  }, [lastUpdated, locale, settings.timeFormat]);
+  }, [browserTimeZone, lastUpdated, locale, settings.timeFormat]);
 
   React.useEffect(() => {
-    setReleaseSortOrder(normalizeReleaseSortOrder(settings.releaseSortOrder));
-  }, [settings.releaseSortOrder]);
-
-  React.useEffect(() => {
-    setRepositoryFormExpanded(settings.repositoryFormExpanded ?? true);
-  }, [settings.repositoryFormExpanded]);
+    setRepositoryTagsById(
+      new Map(
+        repositories.map((repository) => [
+          repository.id,
+          repository.tags ?? [],
+        ]),
+      ),
+    );
+    setRepositoryPinnedById(
+      new Map(
+        repositories.map((repository) => [
+          repository.id,
+          repository.isPinned === true,
+        ]),
+      ),
+    );
+  }, [repositories]);
 
   const handleSortOrderChange = (value: ReleaseSortOrder) => {
-    const previousValue = releaseSortOrder;
-    setReleaseSortOrder(value);
-
-    if (!canMutate) {
-      return;
-    }
-
-    startSortSavingTransition(async () => {
-      try {
-        const result = await updateSettingsAction({
-          ...settings,
-          releaseSortOrder: value,
-        });
-
-        if (!result.success) {
-          setReleaseSortOrder(previousValue);
-          toast({
-            title: result.message.title,
-            description: result.message.description,
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        setReleaseSortOrder(previousValue);
-        toast({
-          title: t("sort_save_error_title"),
-          description: t("sort_save_error_description"),
-          variant: "destructive",
-        });
-      }
-    });
+    sortSetting.update(value);
   };
 
   const handleRepositoryFormToggle = () => {
-    const previousValue = repositoryFormExpanded;
-    const nextValue = !previousValue;
-    setRepositoryFormExpanded(nextValue);
-
-    if (!canMutate) {
-      return;
-    }
-
-    startRepositoryFormSavingTransition(async () => {
-      try {
-        const result = await updateSettingsAction({
-          ...settings,
-          repositoryFormExpanded: nextValue,
-        });
-
-        if (!result.success) {
-          setRepositoryFormExpanded(previousValue);
-          toast({
-            title: result.message.title,
-            description: result.message.description,
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        setRepositoryFormExpanded(previousValue);
-        toast({
-          title: t("repository_form_toggle_save_error_title"),
-          description: t("repository_form_toggle_save_error_description"),
-          variant: "destructive",
-        });
-      }
-    });
+    repositoryFormSetting.update(!repositoryFormSetting.value);
   };
 
   const sortedReleases = React.useMemo(
     () =>
       sortEnrichedReleases(
-        releases,
-        releaseSortOrder,
+        releases.map((release) => ({
+          ...release,
+          repoSettings: {
+            ...release.repoSettings,
+            isPinned:
+              repositoryPinnedById.get(release.repoId) ??
+              release.repoSettings?.isPinned,
+          },
+        })),
+        sortSetting.value,
         settings.providerSortOrder,
         settings.prioritizeNewSecurityReleases,
+        settings,
+      ),
+    [releases, repositoryPinnedById, sortSetting.value, settings],
+  );
+  const tagFilterOptions = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    let untaggedCount = 0;
+
+    for (const repository of repositories) {
+      const tags = repositoryTagsById.get(repository.id) ?? [];
+      if (tags.length === 0) untaggedCount += 1;
+      for (const tag of tags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+
+    return {
+      options: Array.from(counts, ([tag, count]) => ({ tag, count })).sort(
+        (left, right) => left.tag.localeCompare(right.tag, locale),
+      ),
+      untaggedCount,
+    };
+  }, [repositories, repositoryTagsById, locale]);
+  React.useEffect(() => {
+    const availableTags = new Set(
+      tagFilterOptions.options.map(({ tag }) => tag),
+    );
+
+    setSelectedTags((current) => {
+      const next = new Set(
+        Array.from(current).filter((tag) => availableTags.has(tag)),
+      );
+      return next.size === current.size ? current : next;
+    });
+
+    if (tagFilterOptions.untaggedCount === 0) {
+      setIncludeUntagged(false);
+    }
+  }, [tagFilterOptions]);
+  const visibleReleases = React.useMemo(
+    () =>
+      sortedReleases.filter(
+        (release) =>
+          openRepositorySettings.has(release.repoId) ||
+          repositoryMatchesTagFilter(
+            repositoryTagsById.get(release.repoId) ?? [],
+            selectedTags,
+            includeUntagged,
+          ),
       ),
     [
-      releases,
-      releaseSortOrder,
-      settings.providerSortOrder,
-      settings.prioritizeNewSecurityReleases,
+      sortedReleases,
+      repositoryTagsById,
+      selectedTags,
+      includeUntagged,
+      openRepositorySettings,
     ],
   );
+  const isTagFilterActive = selectedTags.size > 0 || includeUntagged;
   const repositoryStats = React.useMemo(() => {
-    const newCount = releases.filter((item) => Boolean(item.isNew)).length;
-    const securityCount = releases.filter(
-      (item) => Boolean(item.isNew) && isSecurityRelease(item.release),
+    const newCount = visibleReleases.filter((item) =>
+      Boolean(item.isNew),
+    ).length;
+    const securityCount = visibleReleases.filter(
+      (item) =>
+        Boolean(item.isNew) && isSecurityRelease(item.release, settings),
     ).length;
 
     return { newCount, securityCount };
-  }, [releases]);
+  }, [visibleReleases, settings]);
+
+  const handleTagToggle = (tag: string) => {
+    setSelectedTags((current) => {
+      const next = new Set(current);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
+  };
+
+  const clearTagFilter = () => {
+    setSelectedTags(new Set());
+    setIncludeUntagged(false);
+  };
+
+  const handleRepositoryTagsChange = (repoId: string, tags: string[]) => {
+    setRepositoryTagsById((current) => {
+      const next = new Map(current);
+      next.set(repoId, tags);
+      return next;
+    });
+  };
+
+  const handleRepositoryPinnedChange = (repoId: string, isPinned: boolean) => {
+    setRepositoryPinnedById((current) => {
+      const next = new Map(current);
+      next.set(repoId, isPinned);
+      return next;
+    });
+  };
+
+  const handleRepositorySettingsOpenChange = (
+    repoId: string,
+    open: boolean,
+  ) => {
+    setOpenRepositorySettings((current) => {
+      const next = new Set(current);
+      if (open) next.add(repoId);
+      else next.delete(repoId);
+      return next;
+    });
+  };
 
   return (
     <>
       {canMutate && (
         <RepositoryForm
           currentRepositories={repositories}
-          isExpanded={repositoryFormExpanded}
-          isExpansionSaving={isRepositoryFormSaving}
+          availableTags={tagFilterOptions.options.map((option) => option.tag)}
+          isExpanded={repositoryFormSetting.value}
+          isExpansionSaving={repositoryFormSetting.isSaving}
           onToggleExpanded={handleRepositoryFormToggle}
         />
       )}
@@ -220,16 +319,27 @@ export function HomePageClient({
             <h2 className="min-w-0 text-2xl font-semibold leading-tight">
               {t("monitored_repos_title")}
             </h2>
-            <span className="shrink-0 text-sm text-muted-foreground sm:text-right">
+            <span className="shrink-0 text-sm text-muted-foreground sm:text-end">
               {[
-                t("repo_count", { count: repositories.length }),
+                isTagFilterActive
+                  ? t("filtered_repo_count", {
+                      visible: visibleReleases.length,
+                      total: repositories.length,
+                    })
+                  : t("repo_count", { count: repositories.length }),
                 t("new_repo_count", { count: repositoryStats.newCount }),
                 t("security_repo_count", {
                   count: repositoryStats.securityCount,
                 }),
               ].join(" | ")}
-              {formattedLastUpdated &&
-                ` | ${t("last_updated", { time: formattedLastUpdated })}`}
+              {formattedLastUpdated && (
+                <>
+                  {" | "}
+                  <span data-testid="last-updated">
+                    {t("last_updated", { time: formattedLastUpdated })}
+                  </span>
+                </>
+              )}
             </span>
           </div>
           <div className="flex w-full flex-col items-stretch gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
@@ -237,6 +347,46 @@ export function HomePageClient({
               <ExportButton />
               {canMutate && <RefreshButton />}
             </div>
+            <RepositoryTagFilter
+              options={tagFilterOptions.options}
+              untaggedCount={tagFilterOptions.untaggedCount}
+              selectedTags={selectedTags}
+              includeUntagged={includeUntagged}
+              onTagToggle={handleTagToggle}
+              onUntaggedToggle={() => setIncludeUntagged((current) => !current)}
+              onClear={clearTagFilter}
+            />
+            <fieldset className="grid grid-cols-2 rounded-md border p-0.5">
+              <legend className="sr-only">{t("view_mode_label")}</legend>
+              <Button
+                type="button"
+                variant={viewMode === "cards" ? "secondary" : "ghost"}
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => updateViewMode("cards")}
+                aria-pressed={viewMode === "cards"}
+                aria-label={t("view_mode_cards")}
+                title={t("view_mode_cards")}
+              >
+                <LayoutGrid className="size-4" />
+                <span className="hidden lg:inline">{t("view_mode_cards")}</span>
+              </Button>
+              <Button
+                type="button"
+                variant={viewMode === "compact" ? "secondary" : "ghost"}
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => updateViewMode("compact")}
+                aria-pressed={viewMode === "compact"}
+                aria-label={t("view_mode_compact")}
+                title={t("view_mode_compact")}
+              >
+                <List className="size-4" />
+                <span className="hidden lg:inline">
+                  {t("view_mode_compact")}
+                </span>
+              </Button>
+            </fieldset>
             <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
               <label
                 htmlFor="release-sort-order"
@@ -245,11 +395,11 @@ export function HomePageClient({
                 {t("sort_label")}
               </label>
               <Select
-                value={releaseSortOrder}
+                value={sortSetting.value}
                 onValueChange={(value: ReleaseSortOrder) =>
                   handleSortOrderChange(value)
                 }
-                disabled={!canMutate || isSortSaving}
+                disabled={!canMutate || sortSetting.isSaving}
               >
                 <SelectTrigger
                   id="release-sort-order"
@@ -296,7 +446,7 @@ export function HomePageClient({
               <AlertTriangle className="size-5 shrink-0" />
               <p>{t("error_summary_title")}</p>
             </div>
-            <ul className="list-disc pl-10 space-y-1">
+            <ul className="list-disc ps-10 space-y-1">
               {Array.from(errorSummary.entries()).map(([type, count]) => (
                 <li key={type}>
                   {t("error_summary_line", {
@@ -311,9 +461,27 @@ export function HomePageClient({
 
         {repositories.length === 0 ? (
           <EmptyState canMutate={canMutate} />
+        ) : visibleReleases.length === 0 ? (
+          <div className="rounded-lg border border-dashed p-8 text-center">
+            <p className="text-muted-foreground">{t("tag_filter_empty")}</p>
+            <Button
+              type="button"
+              variant="outline"
+              className="mt-4"
+              onClick={clearTagFilter}
+            >
+              {t("tag_filter_clear")}
+            </Button>
+          </div>
         ) : (
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {sortedReleases.map((enrichedRelease) =>
+          <div
+            className={
+              viewMode === "cards"
+                ? "grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3"
+                : "grid grid-cols-[repeat(auto-fill,minmax(min(100%,28rem),1fr))] items-start gap-2"
+            }
+          >
+            {visibleReleases.map((enrichedRelease) =>
               enrichedRelease.packageInfo ? (
                 <PackageCard
                   key={enrichedRelease.repoId}
@@ -325,8 +493,31 @@ export function HomePageClient({
                 <ReleaseCard
                   key={enrichedRelease.repoId}
                   enrichedRelease={enrichedRelease}
+                  availableRepositoryTags={tagFilterOptions.options.map(
+                    (option) => option.tag,
+                  )}
+                  repositoryTags={
+                    repositoryTagsById.get(enrichedRelease.repoId) ?? []
+                  }
+                  onRepositoryTagsChange={(tags) =>
+                    handleRepositoryTagsChange(enrichedRelease.repoId, tags)
+                  }
+                  onPinnedChange={(isPinned) =>
+                    handleRepositoryPinnedChange(
+                      enrichedRelease.repoId,
+                      isPinned,
+                    )
+                  }
+                  onSettingsOpenChange={(open) =>
+                    handleRepositorySettingsOpenChange(
+                      enrichedRelease.repoId,
+                      open,
+                    )
+                  }
                   settings={settings}
+                  variant={viewMode === "compact" ? "compact" : "card"}
                   canMutate={canMutate}
+                  isAppriseConfigured={isAppriseConfigured}
                 />
               ),
             )}

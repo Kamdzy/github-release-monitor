@@ -1,7 +1,7 @@
 "use client";
 
 import { Fingerprint, Loader2, RefreshCw, Trash2 } from "lucide-react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import * as React from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -14,70 +14,30 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { authClient } from "@/lib/auth/client";
+import { useBrowserTimeZone } from "@/hooks/use-browser-time-zone";
+import {
+  addPasskey,
+  deletePasskey,
+  listPasskeys,
+  type PasskeyEntry,
+} from "@/lib/auth/client-adapters";
+import { formatAbsoluteDateTime } from "@/lib/date-time";
+import type { TimeFormat } from "@/types";
 
-type PasskeyEntry = {
-  id: string;
-  name: string;
-  createdAt: string | null;
-};
-
-function normalizeCreatedAt(value: unknown): string | null {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const millis = value < 1_000_000_000_000 ? value * 1_000 : value;
-    return new Date(millis).toISOString();
-  }
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? null : value.toISOString();
-  }
-  return null;
-}
-
-function normalizePasskeys(response: unknown): PasskeyEntry[] {
-  const data = (response as { data?: unknown })?.data;
-  const source = Array.isArray(data)
-    ? data
-    : Array.isArray((data as { passkeys?: unknown[] })?.passkeys)
-      ? (data as { passkeys: unknown[] }).passkeys
-      : [];
-
-  return source
-    .map((entry) => {
-      const value = entry as {
-        id?: unknown;
-        name?: unknown;
-        createdAt?: unknown;
-      };
-      const id = typeof value.id === "string" ? value.id : "";
-      if (!id) return null;
-      const name =
-        typeof value.name === "string" && value.name.trim()
-          ? value.name.trim()
-          : id.slice(0, 8);
-      const createdAt = normalizeCreatedAt(
-        value.createdAt ??
-          (value as { created_at?: unknown }).created_at ??
-          (value as { updatedAt?: unknown }).updatedAt ??
-          (value as { updated_at?: unknown }).updated_at,
-      );
-
-      return { id, name, createdAt };
-    })
-    .filter((entry): entry is PasskeyEntry => Boolean(entry));
-}
-
-function formatTimestamp(value: string | null): string {
-  if (!value) return "-";
+function parseTimestamp(value: string | null): Date | null {
+  if (!value) return null;
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "-";
-  return parsed.toLocaleString();
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-export function PasskeySettingsCard() {
+export function PasskeySettingsCard({
+  timeFormat,
+}: {
+  timeFormat: TimeFormat;
+}) {
   const t = useTranslations("SettingsPage");
+  const locale = useLocale();
+  const browserTimeZone = useBrowserTimeZone();
   const [passkeys, setPasskeys] = React.useState<PasskeyEntry[]>([]);
   const [isLoading, setIsLoading] = React.useState(true);
   const [isCreating, setIsCreating] = React.useState(false);
@@ -90,8 +50,7 @@ export function PasskeySettingsCard() {
     setIsLoading(true);
     setErrorKey(null);
     try {
-      const response = await authClient.passkey.listUserPasskeys();
-      setPasskeys(normalizePasskeys(response));
+      setPasskeys(await listPasskeys());
     } catch {
       setErrorKey("passkeys_error_load");
     } finally {
@@ -108,10 +67,8 @@ export function PasskeySettingsCard() {
     setIsCreating(true);
     setErrorKey(null);
     try {
-      const result = await authClient.passkey.addPasskey({
-        name: passkeyName.trim() || undefined,
-      });
-      if (result.error) {
+      const success = await addPasskey(passkeyName.trim() || undefined);
+      if (!success) {
         setErrorKey("passkeys_error_create");
         return;
       }
@@ -129,8 +86,7 @@ export function PasskeySettingsCard() {
     setDeletingId(id);
     setErrorKey(null);
     try {
-      const result = await authClient.passkey.deletePasskey({ id });
-      if (result.error) {
+      if (!(await deletePasskey(id))) {
         setErrorKey("passkeys_error_delete");
         return;
       }
@@ -166,9 +122,9 @@ export function PasskeySettingsCard() {
               aria-busy={isCreating}
             >
               {isCreating ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Loader2 className="me-2 h-4 w-4 animate-spin" />
               ) : (
-                <Fingerprint className="mr-2 h-4 w-4" />
+                <Fingerprint className="me-2 h-4 w-4" />
               )}
               {t("passkeys_add_button")}
             </Button>
@@ -180,9 +136,9 @@ export function PasskeySettingsCard() {
               aria-busy={isLoading}
             >
               {isLoading ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Loader2 className="me-2 h-4 w-4 animate-spin" />
               ) : (
-                <RefreshCw className="mr-2 h-4 w-4" />
+                <RefreshCw className="me-2 h-4 w-4" />
               )}
               {t("passkeys_refresh_button")}
             </Button>
@@ -209,10 +165,28 @@ export function PasskeySettingsCard() {
                 className="flex items-center justify-between rounded-md border p-3"
               >
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{entry.name}</p>
+                  <p dir="auto" className="truncate text-sm font-medium">
+                    {entry.name}
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     {t("passkeys_created_at", {
-                      value: formatTimestamp(entry.createdAt),
+                      value: (() => {
+                        const timestamp = parseTimestamp(entry.createdAt);
+                        if (!timestamp || !browserTimeZone) return "-";
+                        return formatAbsoluteDateTime(timestamp, {
+                          locale,
+                          timeFormat,
+                          timeZone: browserTimeZone,
+                          format: {
+                            year: "numeric",
+                            month: "numeric",
+                            day: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit",
+                            second: "2-digit",
+                          },
+                        });
+                      })(),
                     })}
                   </p>
                 </div>

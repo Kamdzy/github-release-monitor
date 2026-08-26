@@ -1,22 +1,22 @@
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { fetchLatestReleaseWithCache } from "@/lib/releases/cache";
-import { resolveParallelRepoFetches } from "@/lib/releases/filters";
 import {
+  resolveParallelRepoFetches,
+  toGithubReleaseFromCache,
+} from "@/lib/releases/filters";
+import {
+  hasAnyForgejoToken,
   hasAnyGitlabTokenForAllowedHosts,
   parseSupportedRepoUrl,
 } from "@/lib/repositories/providers";
+import { toRepositorySettingsSnapshot } from "@/lib/repositories/settings-snapshot";
 import { log } from "@/lib/server-action-helpers";
-import type {
-  AppSettings,
-  CachedRelease,
-  EnrichedRelease,
-  GithubRelease,
-  Repository,
-} from "@/types";
+import type { AppSettings, EnrichedRelease, Locale, Repository } from "@/types";
 
 export async function getLatestReleasesForRepos(
   repositories: Repository[],
   settings: AppSettings,
-  locale: string,
+  locale: Locale,
   options?: { skipCache?: boolean },
 ): Promise<EnrichedRelease[]> {
   if (repositories.length === 0) {
@@ -27,39 +27,39 @@ export async function getLatestReleasesForRepos(
   const effectiveBatchSize = Math.min(configuredParallel, repositories.length);
   const tokenConfigured = !!process.env.GITHUB_ACCESS_TOKEN?.trim();
   const codebergTokenConfigured = !!process.env.CODEBERG_ACCESS_TOKEN?.trim();
+  const forgejoTokenConfigured = hasAnyForgejoToken();
   const gitlabTokenConfigured = hasAnyGitlabTokenForAllowedHosts();
   log.info(
-    `Fetching ${repositories.length} repositories with parallel batch size ${effectiveBatchSize} (configured=${configuredParallel}, GitHub token=${tokenConfigured ? "yes" : "no"}, Codeberg token=${codebergTokenConfigured ? "yes" : "no"}, GitLab token=${gitlabTokenConfigured ? "yes" : "no"}).`,
+    `Fetching ${repositories.length} repositories with parallel batch size ${effectiveBatchSize} (configured=${configuredParallel}, GitHub token=${tokenConfigured ? "yes" : "no"}, Codeberg token=${codebergTokenConfigured ? "yes" : "no"}, Forgejo token=${forgejoTokenConfigured ? "yes" : "no"}, GitLab token=${gitlabTokenConfigured ? "yes" : "no"}).`,
   );
 
   const buildEnrichedRelease = async (
     repo: Repository,
   ): Promise<EnrichedRelease> => {
+    const repoSettings = toRepositorySettingsSnapshot(repo);
+    const { displayName: _displayName, ...fetchOverrides } = repoSettings;
+    const fetchRepoSettings = {
+      ...fetchOverrides,
+      etag: repo.etag,
+      latestRelease: repo.latestRelease,
+    };
+
     const parsed = parseSupportedRepoUrl(repo.url);
-    if (!parsed) {
+    const storedAsForgejo = repo.id.startsWith("forgejo:");
+    if (
+      !parsed ||
+      (storedAsForgejo &&
+        (parsed.provider !== "forgejo" || parsed.id !== repo.id))
+    ) {
       log.warn(`Skipping invalid repository URL for repoId=${repo.id}`);
       return {
         repoId: repo.id,
         repoUrl: repo.url,
         error: { type: "invalid_url" },
         isNew: repo.isNew,
+        repoSettings,
       };
     }
-
-    const repoSettings = {
-      releaseChannels: repo.releaseChannels,
-      preReleaseSubChannels: repo.preReleaseSubChannels,
-      releasesPerPage: repo.releasesPerPage,
-      refreshInterval: repo.refreshInterval,
-      cacheInterval: repo.cacheInterval,
-      backgroundCheckCron: repo.backgroundCheckCron,
-      includeRegex: repo.includeRegex,
-      excludeRegex: repo.excludeRegex,
-      appriseTags: repo.appriseTags,
-      appriseFormat: repo.appriseFormat,
-      etag: repo.etag,
-      latestRelease: repo.latestRelease,
-    };
 
     const {
       release: latestRelease,
@@ -67,29 +67,20 @@ export async function getLatestReleasesForRepos(
       newEtag,
     } = await fetchLatestReleaseWithCache(
       parsed.provider,
-      parsed.providerHost,
+      parsed.providerBaseUrl ?? parsed.providerHost,
       parsed.owner,
       parsed.repo,
-      repoSettings,
+      fetchRepoSettings,
       settings,
       locale,
       options,
     );
 
     if (error?.type === "not_modified") {
-      const cached: CachedRelease | undefined = repo.latestRelease;
-      const reconstructedRelease: GithubRelease | undefined = cached
-        ? {
-            ...cached,
-            id: 0,
-            prerelease: false,
-            draft: false,
-          }
-        : undefined;
-
-      if (reconstructedRelease) {
-        reconstructedRelease.fetched_at = new Date().toISOString();
-      }
+      const reconstructedRelease = toGithubReleaseFromCache(
+        repo.latestRelease,
+        new Date().toISOString(),
+      );
 
       return {
         repoId: repo.id,
@@ -134,21 +125,9 @@ export async function getLatestReleasesForRepos(
     };
   };
 
-  const results: EnrichedRelease[] = new Array(repositories.length);
-
-  for (
-    let start = 0;
-    start < repositories.length;
-    start += effectiveBatchSize
-  ) {
-    const batch = repositories.slice(start, start + effectiveBatchSize);
-    await Promise.all(
-      batch.map(async (repo, offset) => {
-        const result = await buildEnrichedRelease(repo);
-        results[start + offset] = result;
-      }),
-    );
-  }
-
-  return results;
+  return mapWithConcurrency(
+    repositories,
+    effectiveBatchSize,
+    buildEnrichedRelease,
+  );
 }

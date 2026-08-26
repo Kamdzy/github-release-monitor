@@ -1,4 +1,7 @@
-import { isSecurityRelease } from "@/lib/security-release";
+import {
+  createSecurityReleaseMatcher,
+  type SecurityReleaseDetectionOptions,
+} from "@/lib/security-release";
 import type {
   EnrichedRelease,
   ReleaseProviderSortKey,
@@ -46,6 +49,8 @@ export function getRepoProviderSortKey(
     ? repoId.slice(0, repoId.indexOf(":")).toLowerCase()
     : "github";
 
+  if (provider === "forgejo") return "codeberg";
+
   return repoProviderSortKeys.includes(provider as ReleaseProviderSortKey)
     ? (provider as ReleaseProviderSortKey)
     : "unknown";
@@ -53,6 +58,9 @@ export function getRepoProviderSortKey(
 
 function getRepoNameSortKey(repoId: string): string {
   const provider = getRepoProviderSortKey(repoId);
+  const rawProvider = repoId.includes(":")
+    ? repoId.slice(0, repoId.indexOf(":")).toLowerCase()
+    : "github";
   const path = repoId.includes(":")
     ? repoId.slice(repoId.indexOf(":") + 1)
     : repoId;
@@ -67,6 +75,10 @@ function getRepoNameSortKey(repoId: string): string {
         firstSegment.includes(":"));
 
     return includesGitlabHost ? segments.slice(1).join("/") : path;
+  }
+
+  if (rawProvider === "forgejo") {
+    return path.split("/").slice(-2).join("/");
   }
 
   return path;
@@ -126,15 +138,26 @@ export function sortEnrichedReleases(
   sortOrder: ReleaseSortOrder | undefined,
   providerSortOrder: ReleaseProviderSortKey[] | undefined,
   prioritizeNewSecurityReleases = false,
+  securityReleaseOptions: SecurityReleaseDetectionOptions = {},
 ): EnrichedRelease[] {
   const normalizedSortOrder = normalizeReleaseSortOrder(sortOrder);
+  const matchesSecurityRelease = prioritizeNewSecurityReleases
+    ? createSecurityReleaseMatcher(securityReleaseOptions)
+    : null;
 
   return [...releases].sort((a, b) => {
-    if (prioritizeNewSecurityReleases) {
+    const aIsPinned = a.repoSettings?.isPinned === true;
+    const bIsPinned = b.repoSettings?.isPinned === true;
+
+    if (aIsPinned !== bIsPinned) {
+      return aIsPinned ? -1 : 1;
+    }
+
+    if (matchesSecurityRelease) {
       const aIsNewSecurityRelease =
-        Boolean(a.isNew) && isSecurityRelease(a.release);
+        Boolean(a.isNew) && matchesSecurityRelease(a.release);
       const bIsNewSecurityRelease =
-        Boolean(b.isNew) && isSecurityRelease(b.release);
+        Boolean(b.isNew) && matchesSecurityRelease(b.release);
 
       if (aIsNewSecurityRelease !== bIsNewSecurityRelease) {
         return aIsNewSecurityRelease ? -1 : 1;

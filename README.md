@@ -1,13 +1,14 @@
 # GitHub Release Monitor
 
-A powerful, self-hostable application to automatically monitor GitHub, GitLab, and Codeberg repository releases and receive instant email or Apprise notifications. Keep track of your favorite projects without manually checking for updates.
+A powerful, self-hostable application to automatically monitor GitHub, GitLab, Codeberg, and self-hosted Forgejo repository releases and receive instant email or Apprise notifications. Keep track of your favorite projects without manually checking for updates.
 
 ## ✨ Key Features
 
-- **Automated Release Monitoring**: Add public GitHub, GitLab, and Codeberg repositories and let the app automatically check for new releases in the background.
+- **Automated Release Monitoring**: Add public GitHub, GitLab, Codeberg, and self-hosted Forgejo repositories and let the app automatically check for new releases in the background.
 - **Flexible Notifications**:
   - **Email**: Configure SMTP settings to receive detailed email notifications.
   - **Apprise**: Integrate with [Apprise](https://github.com/caronc/apprise) to send notifications to over 70 services like Discord, Telegram, Slack, and more.
+  - **Per-check Digests**: Choose per channel whether each detected release is sent separately or two or more compatible releases from one check are grouped into a single notification. Singleton groups keep the existing per-release layout. Queue throughput and delivery concurrency are configurable in Settings.
 - **Flexible Release Filtering**:
     - **Global Settings**: Define application-wide rules for which release types (stable, pre-release, draft) to monitor.
     - **Per-Repository Overrides**: Customize filtering rules for individual repositories.
@@ -17,7 +18,10 @@ A powerful, self-hostable application to automatically monitor GitHub, GitLab, a
     - Clean, intuitive interface built with ShadCN UI and Tailwind CSS.
     - Full dark mode support.
     - Responsive design for both desktop and mobile use.
-- **Internationalization (i18n)**: Supports English and German out of the box.
+- **Internationalization (i18n)**: Supports English, German, French, Spanish,
+  Brazilian Portuguese, Indonesian, Hindi, Simplified Chinese, Japanese,
+  Korean, Turkish, Vietnamese, Italian, Polish, Ukrainian, Dutch, Russian,
+  Hebrew, and Arabic out of the box, including right-to-left layout.
 - **Data Management**: Easily import or export your list of monitored repositories via JSON.
 - **System Diagnostics**: A built-in test page to verify GitHub API connectivity and notification service (SMTP, Apprise) configuration.
 - **Secure Authentication**: Protects the application with Better Auth, SQLite-backed users/sessions, and one-time bootstrap setup.
@@ -74,7 +78,7 @@ The `example/` directory contains a complete Docker Compose setup for a robust, 
 
 ### 1. Prerequisites
 - Docker and Docker Compose installed on your server.
-- A domain name (e.g., `github-releases.your-domain.com`) pointing to your server's public IP address.
+- A domain name (e.g., `github-releases.your-domain.test`) pointing to your server's public IP address.
 
 ### 2. Configuration
 Navigate to the `example/` directory. You will need to configure the environment files for each service.
@@ -97,17 +101,23 @@ Navigate to the `example/` directory. You will need to configure the environment
    AUTH_LOGIN_WINDOW_SECONDS=900
    # Maximum failed login attempts before lockout starts.
    AUTH_MAX_LOGIN_ATTEMPTS=5
+   # Trust client IP headers only when a known reverse proxy overwrites them.
+   AUTH_TRUST_PROXY_HEADERS=true
+   # Number of trusted proxy entries at the right side of X-Forwarded-For.
+   AUTH_TRUSTED_PROXY_HOPS=1
 
    # Better Auth secret (at least 32 chars). Generate: openssl rand -base64 32
    BETTER_AUTH_SECRET=your_super_secret_better_auth_key_here
    # Base URL of the app (required by Better Auth for cookie/session handling)
-   BETTER_AUTH_URL=https://github-releases.your-domain.com
+   BETTER_AUTH_URL=https://github-releases.your-domain.test
    # One-time token for initial admin setup (recommended 32+ chars)
    AUTH_SETUP_TOKEN=your_one_time_setup_token_here
    # Keep self-service signup disabled by default (recommended for single-user)
    AUTH_ENABLE_SIGNUP=false
    # Enable passkeys (WebAuthn) for passwordless login
    AUTH_ENABLE_PASSKEY=true
+   # Password reset link lifetime in seconds (60-86400)
+   AUTH_PASSWORD_RESET_TOKEN_TTL_SECONDS=900
    # Optional social login providers
    AUTH_GITHUB_CLIENT_ID=
    AUTH_GITHUB_CLIENT_SECRET=
@@ -119,6 +129,8 @@ Navigate to the `example/` directory. You will need to configure the environment
    # You can generate one using: openssl rand -base64 32
    AUTH_SECRET=your_super_secret_better_auth_key_here
    ```
+
+   For backward compatibility, version 2.x continues to trust proxy client-address headers for logging and login limits when `AUTH_TRUST_PROXY_HEADERS` is unset. Password-reset IP limits are stricter: they use `X-Forwarded-For` or `X-Real-IP` only when this option is explicitly set to `true`. Otherwise, password-reset requests are limited by a hashed account identifier without storing the submitted username or email address. Set the value explicitly: use `true` only when a trusted reverse proxy overwrites these headers, and `false` when the app is exposed directly. The general compatibility default will change to `false` in the next major release.
 
    **Protocol (HTTP/HTTPS)**
    By default, the application runs in secure (HTTPS) mode. If you are not using a reverse proxy and need to run the app on plain HTTP, you must set this variable.
@@ -143,14 +155,14 @@ Navigate to the `example/` directory. You will need to configure the environment
    - For private repositories, ensure the token has at least project role `Reporter` (or higher).
    ```env
    # Optional additional GitLab instances besides gitlab.com (comma-separated).
-   GITLAB_ADDITIONAL_HOSTS=gitlab.example.com,gitlab.internal.example
+   GITLAB_ADDITIONAL_HOSTS=gitlab.example.test,gitlab.internal.test
 
    # Optional host-based GitLab tokens as comma-separated host=token pairs.
-   # Example: gitlab.com=glpat_xxx,gitlab.example.com=glpat_yyy
+   # Example: gitlab.com=glpat_xxx,gitlab.example.test=glpat_yyy
    GITLAB_ACCESS_TOKENS=
 
    # Optional host-based GitLab deploy tokens as comma-separated host=username:token pairs.
-   # Example: gitlab.example.com=gitlab+deploy-token-123:gl-dpt-xyz
+   # Example: gitlab.example.test=gitlab+deploy-token-123:gl-dpt-xyz
    GITLAB_DEPLOY_TOKENS=
    ```
 
@@ -163,8 +175,19 @@ Navigate to the `example/` directory. You will need to configure the environment
    CODEBERG_ACCESS_TOKEN=your_codeberg_token_here
    ```
 
+   **Self-hosted Forgejo API (Optional)**
+   Configure every Forgejo instance that repository URLs may target. Full base URLs support HTTPS, HTTP, ports, and subpath installations. Redirects are followed only while they remain within the configured origin and base path; using the final directly reachable base URL is recommended.
+   - Public repositories work without a token.
+   - Private repositories typically require `read:repository`.
+   - `read:user` is only needed to show account details on the diagnostics page.
+   ```env
+   FORGEJO_ADDITIONAL_BASE_URLS=https://forgejo.example.test,http://forgejo.internal.test:3000,https://scm.example.test/code
+   FORGEJO_ACCESS_TOKENS=https://forgejo.example.test=token1,http://forgejo.internal.test:3000=token2
+   ```
+
    **Localization**
-   Set the timezone for date and log formatting.
+   Set the server timezone used by schedules, logs, emails, and background
+   notifications. Interactive UI timestamps use each viewer's browser timezone.
    ```env
    # The timezone for the container (e.g., `Europe/Berlin`).
    TZ=Europe/Berlin
@@ -184,9 +207,9 @@ Navigate to the `example/` directory. You will need to configure the environment
    The example compose setup uses a local SMTP relay. The default values are already set for this. You only need to change `MAIL_FROM_ADDRESS` and `MAIL_TO_ADDRESS`.
    ```env
    # The "from" and "to" addresses for notifications.
-   MAIL_FROM_ADDRESS=notifications@your-domain.com
+   MAIL_FROM_ADDRESS=notifications@your-domain.test
    MAIL_FROM_NAME=GitHub Release Monitor
-   MAIL_TO_ADDRESS=your-personal-email@example.com
+   MAIL_TO_ADDRESS=your-personal-email@example.test
    ```
    **Important**: For this Docker setup, `MAIL_HOST` is correctly set to `smtp` and `MAIL_PORT` to `25`. You do not need a `MAIL_USERNAME` or `MAIL_PASSWORD` for the local relay.
 
@@ -216,9 +239,9 @@ Navigate to the `example/` directory. You will need to configure the environment
    labels:
      # ...
      # HTTP Router
-     - "traefik.http.routers.github-release-monitor.rule=Host(`github-releases.your-domain.com`)"
+     - "traefik.http.routers.github-release-monitor.rule=Host(`github-releases.your-domain.test`)"
      # HTTPS Router
-     - "traefik.http.routers.github-release-monitor-secured.rule=Host(`github-releases.your-domain.com`)"
+     - "traefik.http.routers.github-release-monitor-secured.rule=Host(`github-releases.your-domain.test`)"
      # ...
    ```
 
@@ -230,7 +253,7 @@ Navigate to the `example/` directory. You will need to configure the environment
    # ...
    command:
      # ...
-     - "--certificatesresolvers.letsencrypt.acme.email=your-email@your-domain.com"
+     - "--certificatesresolvers.letsencrypt.acme.email=your-email@your-domain.test"
      # ...
    ```
 
@@ -242,8 +265,8 @@ For improved email deliverability and to avoid being marked as spam, it's recomm
    ```yaml
    # ...
    environment:
-     - "POSTFIX_myhostname=your-domain.com"
-     - "OPENDKIM_DOMAINS=your-domain.com=example-mail"
+     - "POSTFIX_myhostname=your-domain.test"
+     - "OPENDKIM_DOMAINS=your-domain.test=example-mail"
    # ...
    ```
 For further customization of the SMTP relay, please refer to the official documentation of the [wader/postfix-relay](https://github.com/wader/postfix-relay) image.
@@ -278,7 +301,7 @@ docker compose -f example/smtp/compose.yaml up -d
 docker compose -f example/github-release-monitor/compose.yaml up -d
 ```
 
-After a few moments, your application should be accessible at `https://github-releases.your-domain.com` with a valid SSL certificate.
+After a few moments, your application should be accessible at `https://github-releases.your-domain.test` with a valid SSL certificate.
 
 ---
 
@@ -379,6 +402,10 @@ AUTH_LOGIN_LOCKOUT_SECONDS=900
 AUTH_LOGIN_WINDOW_SECONDS=900
 # Maximum failed login attempts before lockout starts.
 AUTH_MAX_LOGIN_ATTEMPTS=5
+# Enable only when a trusted reverse proxy overwrites client IP headers.
+AUTH_TRUST_PROXY_HEADERS=false
+# Number of trusted proxy entries at the right side of X-Forwarded-For.
+AUTH_TRUSTED_PROXY_HOPS=1
 
 # Better Auth secret (at least 32 chars). Generate: openssl rand -base64 32
 BETTER_AUTH_SECRET=your_super_secret_better_auth_key_here
@@ -390,6 +417,8 @@ AUTH_SETUP_TOKEN=your_one_time_setup_token_here
 AUTH_ENABLE_SIGNUP=false
 # Enable passkeys (WebAuthn) for passwordless login
 AUTH_ENABLE_PASSKEY=true
+# Password reset link lifetime in seconds (60-86400)
+AUTH_PASSWORD_RESET_TOKEN_TTL_SECONDS=900
 # Optional social login providers
 AUTH_GITHUB_CLIENT_ID=
 AUTH_GITHUB_CLIENT_SECRET=
@@ -400,6 +429,8 @@ AUTH_TRUST_SOCIAL_LINKING=true
 # Optional fallback for older setups
 AUTH_SECRET=your_super_secret_better_auth_key_here
 ```
+
+Version 2.x retains the previous trusted-header behavior for logging and login limits when `AUTH_TRUST_PROXY_HEADERS` is unset. Password-reset IP limits use proxy client-address headers only when this option is explicitly `true`; otherwise, they fall back to a hashed account identifier. Configure the option explicitly so a future major upgrade does not change the deployment's general client-address handling unexpectedly.
 
 #### **Protocol (HTTP/HTTPS)**
 
@@ -430,14 +461,14 @@ If you want to monitor private GitLab repositories (including self-hosted instan
 
 ```env
 # Optional additional GitLab instances besides gitlab.com (comma-separated).
-GITLAB_ADDITIONAL_HOSTS=gitlab.example.com,gitlab.internal.example
+GITLAB_ADDITIONAL_HOSTS=gitlab.example.test,gitlab.internal.test
 
 # Optional host-based GitLab tokens as comma-separated host=token pairs.
-# Example: gitlab.com=glpat_xxx,gitlab.example.com=glpat_yyy
+# Example: gitlab.com=glpat_xxx,gitlab.example.test=glpat_yyy
 GITLAB_ACCESS_TOKENS=
 
 # Optional host-based GitLab deploy tokens as comma-separated host=username:token pairs.
-# Example: gitlab.example.com=gitlab+deploy-token-123:gl-dpt-xyz
+# Example: gitlab.example.test=gitlab+deploy-token-123:gl-dpt-xyz
 GITLAB_DEPLOY_TOKENS=
 ```
 
@@ -452,10 +483,24 @@ Codeberg runs on Gitea/Forgejo and exposes a Gitea-compatible REST API. If you w
 CODEBERG_ACCESS_TOKEN=your_codeberg_token_here
 ```
 
-#### **Localization**
-Set the timezone for date and log formatting.
+#### **Self-hosted Forgejo API (Optional)**
+
+Allow each Forgejo base URL explicitly. Base URLs may use HTTPS or HTTP, include a port, and include the instance subpath. Redirects are followed only while every target remains within the configured origin and base path, so credentials cannot be forwarded to another server or installation. Configure the final directly reachable URL whenever possible.
+
+Base URLs must not contain credentials, a query, or a fragment. Encoded slash and backslash characters are rejected because they make the configured path boundary ambiguous. Base paths remain case-sensitive and are de-duplicated by authority plus exact subpath, so HTTP and HTTPS variants of the same instance cannot be configured together. Token entries are used only when their normalized base URL exactly matches an allowed instance.
+
 ```env
-# The timezone for the container (e.g., `Europe/Berlin`). Affects log timestamps and date formatting.
+FORGEJO_ADDITIONAL_BASE_URLS=https://forgejo.example.test,http://forgejo.internal.test:3000,https://scm.example.test/code
+FORGEJO_ACCESS_TOKENS=https://forgejo.example.test=token1,http://forgejo.internal.test:3000=token2
+```
+
+Tokens for private repositories typically need `read:repository`. The optional `read:user` scope is used only to display account information on the diagnostics page. Support targets Forgejo's v1 REST API and does not imply compatibility with arbitrary Gitea versions. Self-signed TLS certificates are not supported; use a trusted certificate or an explicitly configured internal HTTP base URL.
+
+#### **Localization**
+Set the server timezone used by schedules, logs, emails, and background
+notifications. Interactive UI timestamps use each viewer's browser timezone.
+```env
+# The timezone for the container (e.g., `Europe/Berlin`).
 TZ=Europe/Berlin
 ```
 
@@ -465,16 +510,32 @@ These variables are required if you want to receive email notifications.
 
 ```env
 # Your SMTP server details.
-MAIL_HOST=smtp.example.com
+MAIL_HOST=smtp.example.test
 MAIL_PORT=587
-MAIL_USERNAME=your-email@example.com
+MAIL_USERNAME=your-email@example.test
 MAIL_PASSWORD=your_email_password_or_app_token
+MAIL_TLS_REJECT_UNAUTHORIZED=true
 
 # The "from" and "to" addresses for notifications.
-MAIL_FROM_ADDRESS=notifications@your-domain.com
+MAIL_FROM_ADDRESS=notifications@your-domain.test
 MAIL_FROM_NAME=GitHub Release Monitor
-MAIL_TO_ADDRESS=your-personal-email@example.com
+MAIL_TO_ADDRESS=your-personal-email@example.test
 ```
+
+SMTP TLS certificates are verified by default. For a relay signed by an
+internal certificate authority, prefer mounting the CA certificate into the
+container and setting `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`. This extends the
+trusted CA list while keeping certificate and hostname verification enabled.
+
+As a last resort for a relay in a controlled internal network, set
+`MAIL_TLS_REJECT_UNAUTHORIZED=false`. Only the exact value `false` disables
+verification. This accepts all invalid SMTP TLS certificates, including
+self-signed, expired, and hostname-mismatched certificates, and therefore
+reduces protection against man-in-the-middle attacks. Restart the application
+after changing either environment variable. See the
+[Nodemailer TLS options](https://nodemailer.com/smtp#tls-options) and
+[`NODE_EXTRA_CA_CERTS` documentation](https://nodejs.org/api/cli.html#node_extra_ca_certsfile)
+for details.
 
 #### **Apprise Configuration (Optional)**
 
@@ -530,9 +591,148 @@ Version 2.0.0 replaces the old `iron-session` username/password login with Bette
 4. Start the updated app and open the login page. The first run shows the setup form; enter `AUTH_SETUP_TOKEN` and create the initial admin account. The old `AUTH_USERNAME`/`AUTH_PASSWORD` credentials are not imported automatically.
 5. Optional: configure `AUTH_ENABLE_PASSKEY`, `AUTH_ENABLE_SIGNUP`, or the GitHub/Google OAuth variables after the first account exists.
 
-Admin usernames must be 3-30 characters and may contain letters, numbers, `_`, and `.`. Passwords must be at least 12 characters and include uppercase, lowercase, and a number.
+Admin usernames must be 3-30 characters and may contain letters, numbers, `_`, and `.`. Passwords must contain 12-128 characters, include uppercase, lowercase, and a number, and contain no whitespace.
 
 ---
+
+## 🔑 Password Recovery and User Administration
+
+When SMTP is configured (`MAIL_HOST`, `MAIL_PORT`, and `MAIL_FROM_ADDRESS`),
+the login page provides a **Forgot password?** flow that accepts either the
+username or email address. Reset links are single-use, expire after
+`AUTH_PASSWORD_RESET_TOKEN_TTL_SECONDS` (15 minutes by default), and revoke all
+existing sessions after a successful reset.
+
+An administrator with access to the installation host can generate the same
+Better Auth reset link without SMTP. The account can be selected by username
+or email.
+
+For a Docker deployment:
+
+```bash
+docker exec -it github-release-monitor \
+  node /app/grm-cli.mjs auth reset-password --user admin
+```
+
+For a manual installation, run the CLI from the project root after
+`npm run build`. Node must load the same `.env` file as the application so the
+CLI uses the configured Better Auth secret, public URL, and token lifetime:
+
+```bash
+node --env-file=.env .next/cli/grm-cli.mjs \
+  auth reset-password --user admin
+```
+
+If the application has not been built yet, `npm run build:cli` is sufficient
+to create `.next/cli/grm-cli.mjs`.
+
+Create another internal account and print a one-time password setup link:
+
+```bash
+docker exec -it github-release-monitor \
+  node /app/grm-cli.mjs auth create-user \
+  --username second_admin --email user@example.com --name "Second administrator"
+```
+
+Manual installation equivalent:
+
+```bash
+node --env-file=.env .next/cli/grm-cli.mjs \
+  auth create-user \
+  --username second_admin --email user@example.com --name "Second administrator"
+```
+
+Alternatively, set the initial password through a hidden, repeated TTY prompt:
+
+```bash
+docker exec -it github-release-monitor \
+  node /app/grm-cli.mjs auth create-user \
+  --username second_admin --email user@example.com --prompt-password
+```
+
+Manual installation equivalent (run it in an interactive terminal):
+
+```bash
+node --env-file=.env .next/cli/grm-cli.mjs \
+  auth create-user \
+  --username second_admin --email user@example.com --prompt-password
+```
+
+Permanently delete an internal account by username or email. To reduce the
+risk of deleting the wrong account, the interactive command displays the
+resolved account and requires its exact username as confirmation:
+
+```bash
+docker exec -it github-release-monitor \
+  node /app/grm-cli.mjs auth delete-user --user former_admin
+```
+
+Manual installation equivalent:
+
+```bash
+node --env-file=.env .next/cli/grm-cli.mjs \
+  auth delete-user --user former_admin
+```
+
+For deliberate non-interactive automation, `--yes` skips the confirmation:
+
+```bash
+docker exec github-release-monitor \
+  node /app/grm-cli.mjs auth delete-user --user former_admin --yes
+```
+
+Deletion removes the account and its authentication data, including active
+sessions and linked login methods, and cannot be undone. The final remaining
+account cannot be deleted.
+
+Passwords are never accepted as command-line values. All internal accounts
+currently have the same full application permissions; `create-user` does not
+implement or imply a separate role model. Treat CLI access as administrative
+access because these commands can print credential-recovery links to the terminal.
+For manual installations, run the command from the project root as a user with
+write access to `data/`; this ensures it opens the same `data/auth.db` as the
+application.
+
+The CLI uses exit code `2` for invalid input, `3` when an account is not found,
+`4` for ambiguous identifiers, account conflicts, or last-account protection,
+and `5` for database or other runtime failures.
+
+`BETTER_AUTH_URL` must be the browser-facing canonical URL. CLI-generated links
+use that origin and the locale stored in the application settings.
+
+---
+
+## 🌐 Adding a Locale
+
+Locales are defined centrally in `src/i18n/config.ts`. To publish another
+language:
+
+1. Add its canonical BCP 47 code, native name, text direction, and font profile
+   to the locale registry. Available profiles are `inter`, `noto`,
+   `noto-arabic`, `noto-devanagari`, `noto-cjk-jp`, `noto-cjk-kr`,
+   `noto-cjk-sc`, and `noto-hebrew`.
+2. Add a complete `src/messages/<locale>.json` dictionary. The test suite
+   compares every configured dictionary and ICU placeholder with English.
+3. Add translated canonical route slugs in `src/i18n/routing.ts`. English
+   slugs are accepted as aliases; keep replaced published slugs as historical
+   aliases.
+4. Verify font coverage and the complete bidirectional layout before publishing
+   the locale. Prefer logical start/end spacing, use `dir="auto"` for user text,
+   and keep URLs, identifiers, versions, email addresses, cron expressions,
+   regular expressions, OTPs, and code explicitly left-to-right.
+
+The locale switcher, settings validation, cookies, authentication redirects,
+message loading, document direction, Radix direction, and body font are derived
+from the registry. Hebrew (`he`) and Arabic (`ar`) are published with Noto Sans
+Hebrew and Noto Sans Arabic respectively, together with right-to-left layout
+support. Simplified Chinese (`zh-CN`) is published with
+Noto Sans SC, Japanese (`ja`) uses Noto Sans JP, Korean (`ko`) uses Noto Sans
+KR, Hindi (`hi`) uses Noto Sans Devanagari, and Turkish (`tr`) uses Noto Sans
+for Latin Extended coverage. Vietnamese (`vi`) uses Noto Sans for its extended
+Latin diacritics, while Ukrainian (`uk`) and Russian (`ru`) use it for Cyrillic
+coverage.
+Italian (`it`), Indonesian (`id`), Polish (`pl`), and Dutch (`nl`) use the
+existing Inter profile.
 
 ## 🔐 Social Login Setup (GitHub + Google)
 
@@ -558,10 +758,10 @@ Official documentation:
 
 1. Open: `GitHub -> Settings -> Developer settings -> OAuth Apps -> New OAuth App`
 2. Fill in:
-   - **Homepage URL**: your app URL (e.g. `http://localhost:3000` or `https://your-domain.tld`)
+   - **Homepage URL**: your app URL (e.g. `http://localhost:3000` or `https://your-domain.test`)
    - **Authorization callback URL**:
      - Local: `http://localhost:3000/api/auth/callback/github`
-     - Production: `https://your-domain.tld/api/auth/callback/github`
+     - Production: `https://your-domain.test/api/auth/callback/github`
 3. Create app and copy:
    - **Client ID** -> `AUTH_GITHUB_CLIENT_ID`
    - **Client Secret** -> `AUTH_GITHUB_CLIENT_SECRET`
@@ -576,10 +776,10 @@ Official documentation:
 3. Configure:
    - **Authorized redirect URIs**:
      - Local: `http://localhost:3000/api/auth/callback/google`
-     - Production: `https://your-domain.tld/api/auth/callback/google`
+     - Production: `https://your-domain.test/api/auth/callback/google`
    - **Authorized JavaScript origins** (optional but recommended):
      - `http://localhost:3000`
-     - `https://your-domain.tld`
+     - `https://your-domain.test`
 4. Copy:
    - **Client ID** -> `AUTH_GOOGLE_CLIENT_ID`
    - **Client Secret** -> `AUTH_GOOGLE_CLIENT_SECRET`
@@ -598,8 +798,11 @@ Here is a complete list of all environment variables used by the application.
 | `AUTH_LOGIN_LOCKOUT_SECONDS` | Lockout duration (seconds) after too many failed login attempts.                                   | No                     | `900`                      |
 | `AUTH_LOGIN_WINDOW_SECONDS` | Time window (seconds) used to count failed login attempts.                                          | No                     | `900`                      |
 | `AUTH_MAX_LOGIN_ATTEMPTS` | Maximum failed login attempts before a temporary lockout is applied.                                 | No                     | `5`                        |
+| `AUTH_TRUST_PROXY_HEADERS` | Trusts `X-Forwarded-For`/`X-Real-IP` for per-client login limits and, only when explicitly `true`, password-reset IP limits. Without explicit trust, password resets use a hashed account-identifier limit instead. Set to `true` only behind a proxy that overwrites these headers; use `false` for direct exposure. Version 2.x preserves the general trusted-header behavior when unset; the next major will default to `false`. | No | `true` (2.x compatibility; explicit `true` required for reset IP limits) |
+| `AUTH_TRUSTED_PROXY_HOPS` | Number of trusted proxy entries counted from the right side of `X-Forwarded-For` (1-10).                | No                     | `1`                        |
 | `AUTH_ENABLE_SIGNUP`  | Enables self-service signup when set to `true`. Keep `false` for single-user mode.                     | No                     | `false`                    |
 | `AUTH_ENABLE_PASSKEY` | Enables WebAuthn passkey features when set to `true`.                                                   | No                     | `true`                     |
+| `AUTH_PASSWORD_RESET_TOKEN_TTL_SECONDS` | Lifetime of single-use password reset links in seconds (60-86400).                              | No                     | `900`                      |
 | `AUTH_TRUST_SOCIAL_LINKING` | Trusts configured social providers for automatic account linking by email (`github`, `google`).         | No                     | `true`                     |
 | `AUTH_SETUP_TOKEN`    | One-time setup token used to create the first user when no users exist yet.                             | Recommended            | -                          |
 | `AUTH_SECRET`         | Backward-compatible fallback for `BETTER_AUTH_SECRET`.                                                   | No                     | -                          |
@@ -610,6 +813,8 @@ Here is a complete list of all environment variables used by the application.
 | `BETTER_AUTH_SECRET`  | Better Auth secret key (minimum 32 characters).                                                          | **Yes**                | -                          |
 | `BETTER_AUTH_URL`     | Base URL used by Better Auth (e.g. `http://localhost:3000`).                                            | **Yes**                | -                          |
 | `CODEBERG_ACCESS_TOKEN` | A Codeberg access token (Gitea API) for private repos. Typically needs `read:repository`; `read:user` only for diagnostics. | No                     | -                          |
+| `FORGEJO_ADDITIONAL_BASE_URLS` | Allowed self-hosted Forgejo base URLs, comma-separated. Supports HTTP/HTTPS, ports, and subpaths. | No | - |
+| `FORGEJO_ACCESS_TOKENS` | Base-URL-based Forgejo tokens as comma-separated `base-url=token` pairs for private repos. | No | - |
 | `GITHUB_ACCESS_TOKEN` | A GitHub Personal Access Token to increase the API rate limit. A token with no scopes is sufficient.      | No (but recommended)   | -                          |
 | `GITLAB_ADDITIONAL_HOSTS` | Additional GitLab hosts (without schema/port), comma-separated. `gitlab.com` is always allowed.       | No                     | -                          |
 | `GITLAB_ACCESS_TOKENS` | Host-based GitLab tokens as comma-separated `host=token` pairs for private repos.                         | No                     | -                          |
@@ -621,16 +826,14 @@ Here is a complete list of all environment variables used by the application.
 | `MAIL_HOST`           | The hostname or IP address of your SMTP server.                                                           | Yes, for email         | -                          |
 | `MAIL_PASSWORD`       | The password or app token for SMTP authentication.                                                        | No (depends on server) | -                          |
 | `MAIL_PORT`           | The port for your SMTP server (e.g., 587 or 465).                                                         | Yes, for email         | -                          |
+| `MAIL_TLS_REJECT_UNAUTHORIZED` | Verifies SMTP TLS certificates. Only `false` disables verification for invalid or self-signed certificates. | No | `true` |
 | `MAIL_TO_ADDRESS`     | The email address that will receive the notifications.                                                    | Yes, for email         | -                          |
 | `MAIL_USERNAME`       | The username for SMTP authentication.                                                                     | No (depends on server) | -                          |
-| `TZ`                  | The timezone for the container (e.g., `Europe/Berlin`). Affects log timestamps and date formatting.       | No                     | System default             |
+| `TZ`                  | Server timezone for schedules, logs, emails, and background notifications. UI timestamps use the browser timezone. | No                     | System default             |
 
 ## Star History
 
-<a href="https://www.star-history.com/#iamspido/github-release-monitor&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=iamspido/github-release-monitor&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=iamspido/github-release-monitor&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=iamspido/github-release-monitor&type=Date" />
- </picture>
-</a>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/iamspido/github-release-monitor/star-history/assets/star-history-dark.svg" />
+  <img alt="Star History Chart" src="https://raw.githubusercontent.com/iamspido/github-release-monitor/star-history/assets/star-history.svg" />
+</picture>

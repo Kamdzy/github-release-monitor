@@ -13,6 +13,12 @@ vi.mock("next-intl/server", () => ({
 
 import { deflateSync } from "node:zlib";
 import type { AppSettings, Repository } from "@/types";
+import {
+  fetchCallHeaders,
+  headerRecord,
+  installFetchMock,
+  mockFetchResponse,
+} from "../helpers/fetch";
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
   const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
@@ -65,7 +71,7 @@ function buildUploadPackResponseForSingleCommit(
   epochSeconds: number,
 ): Uint8Array {
   const encoder = new TextEncoder();
-  const commitObject = `tree 1111111111111111111111111111111111111111\nauthor Test <test@example.com> ${epochSeconds} +0000\ncommitter Test <test@example.com> ${epochSeconds} +0000\n\n${commitMessage}\n`;
+  const commitObject = `tree 1111111111111111111111111111111111111111\nauthor Test <test@example.test> ${epochSeconds} +0000\ncommitter Test <test@example.test> ${epochSeconds} +0000\n\n${commitMessage}\n`;
   const commitBytes = encoder.encode(commitObject);
   const objectHeader = encodePackObjectHeader(1, commitBytes.length);
   const compressed = deflateSync(commitBytes);
@@ -103,8 +109,7 @@ describe("actions GitLab self-hosted fetcher", () => {
 
   beforeEach(() => {
     vi.resetModules();
-    // @ts-expect-error
-    global.fetch = vi.fn();
+    installFetchMock();
     delete process.env.GITLAB_ADDITIONAL_HOSTS;
     delete process.env.GITLAB_ACCESS_TOKENS;
     delete process.env.GITLAB_DEPLOY_TOKENS;
@@ -112,6 +117,69 @@ describe("actions GitLab self-hosted fetcher", () => {
 
   afterEach(() => {
     global.fetch = fetchBackup;
+  });
+
+  it("does not use a page-one ETag for highest-version selection", async () => {
+    process.env.GITLAB_ADDITIONAL_HOSTS = "gitlab.self.test";
+    const actions = await import("@/app/actions");
+    const repo: Repository = {
+      id: "gitlab:gitlab.self.test/group/repo",
+      url: "https://gitlab.self.test/group/repo",
+      releaseSelectionStrategy: "highest_version",
+      releasesPerPage: 101,
+      etag: 'W/"page-one"',
+      latestRelease: {
+        html_url: "https://gitlab.self.test/group/repo/-/releases/v1.0.0",
+        tag_name: "v1.0.0",
+        name: "v1.0.0",
+        body: "body",
+        created_at: "2024-01-01T00:00:00Z",
+        published_at: "2024-01-01T00:00:00Z",
+      },
+    };
+
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      tag_name: `v${index + 1}.0.0`,
+      name: `v${index + 1}.0.0`,
+      description: "body",
+      created_at: "2024-02-01T00:00:00Z",
+      released_at: "2024-02-01T00:00:00Z",
+      upcoming_release: false,
+    }));
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({ status: 200, json: firstPage }),
+    );
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        json: [
+          {
+            tag_name: "v999.0.0",
+            name: "v999.0.0",
+            description: "body",
+            created_at: "2024-02-01T00:00:00Z",
+            released_at: "2024-02-01T00:00:00Z",
+            upcoming_release: false,
+          },
+        ],
+      }),
+    );
+
+    const enriched = await actions.getLatestReleasesForRepos(
+      [repo],
+      baseSettings,
+      "en",
+      { skipCache: true },
+    );
+
+    expect(enriched[0].release?.tag_name).toBe("v999.0.0");
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(2);
+    expect(
+      headerRecord(fetchCallHeaders(vi.mocked(global.fetch).mock.calls[0]))[
+        "If-None-Match"
+      ],
+    ).toBeUndefined();
   });
 
   it("uses allowed self-hosted GitLab host and host-specific token", async () => {
@@ -124,23 +192,22 @@ describe("actions GitLab self-hosted fetcher", () => {
       url: "https://gitlab.self.test/group/repo",
     };
 
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      json: async () => [
-        {
-          tag_name: "v1.2.3",
-          name: "v1.2.3",
-          description: "release body",
-          created_at: new Date().toISOString(),
-          released_at: new Date().toISOString(),
-          upcoming_release: false,
-        },
-      ],
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        json: [
+          {
+            tag_name: "v1.2.3",
+            name: "v1.2.3",
+            description: "release body",
+            created_at: new Date().toISOString(),
+            released_at: new Date().toISOString(),
+            upcoming_release: false,
+          },
+        ],
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -152,12 +219,103 @@ describe("actions GitLab self-hosted fetcher", () => {
     expect(enriched[0].error).toBeUndefined();
     expect(enriched[0].release?.tag_name).toBe("v1.2.3");
 
-    // @ts-expect-error
-    const [requestUrl, requestOpts] = vi.mocked(global.fetch).mock.calls[0];
+    const requestCall = vi.mocked(global.fetch).mock.calls[0];
+    const [requestUrl] = requestCall;
     expect(requestUrl).toContain(
       "https://gitlab.self.test/api/v4/projects/group%2Frepo/releases",
     );
-    expect(requestOpts.headers["PRIVATE-TOKEN"]).toBe("glpat-self");
+    expect(headerRecord(fetchCallHeaders(requestCall))["PRIVATE-TOKEN"]).toBe(
+      "glpat-self",
+    );
+  });
+
+  it("resolves release-note commit references through the GitLab commit API", async () => {
+    process.env.GITLAB_ADDITIONAL_HOSTS = "gitlab.self.test";
+    process.env.GITLAB_ACCESS_TOKENS = "gitlab.self.test=glpat-self";
+    const actions = await import("@/app/actions");
+    const sha = "abcdef1234567890abcdef1234567890abcdef12";
+    const repo: Repository = {
+      id: "gitlab:gitlab.self.test/group/repo",
+      url: "https://gitlab.self.test/group/repo",
+    };
+
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce(
+        mockFetchResponse({
+          json: [
+            {
+              tag_name: "v1.2.3",
+              name: "v1.2.3",
+              description: "Fix abcdef1",
+              created_at: "2026-01-01T00:00:00Z",
+              released_at: "2026-01-01T00:00:00Z",
+              upcoming_release: false,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockFetchResponse({
+          json: {
+            id: sha,
+            web_url: `https://gitlab.self.test/group/repo/-/commit/${sha}`,
+          },
+        }),
+      );
+
+    const [result] = await actions.getLatestReleasesForRepos(
+      [repo],
+      baseSettings,
+      "en",
+      { skipCache: true },
+    );
+
+    expect(result.release?.commit_links).toEqual([
+      {
+        ref: "abcdef1",
+        sha,
+        url: `https://gitlab.self.test/group/repo/-/commit/${sha}`,
+      },
+    ]);
+    expect(String(vi.mocked(global.fetch).mock.calls[1][0])).toBe(
+      "https://gitlab.self.test/api/v4/projects/group%2Frepo/repository/commits/abcdef1?stats=false",
+    );
+  });
+
+  it("uses GitLab's provider-latest permalink when configured", async () => {
+    process.env.GITLAB_ADDITIONAL_HOSTS = "gitlab.self.test";
+    process.env.GITLAB_ACCESS_TOKENS = "gitlab.self.test=glpat-self";
+    const actions = await import("@/app/actions");
+    const repo: Repository = {
+      id: "gitlab:gitlab.self.test/group/repo",
+      url: "https://gitlab.self.test/group/repo",
+      releaseSelectionStrategy: "provider_latest",
+    };
+    const release = {
+      tag_name: "v1.2.3",
+      name: "v1.2.3",
+      description: "release body",
+      created_at: "2024-01-01T00:00:00Z",
+      released_at: "2024-01-01T00:00:00Z",
+      upcoming_release: false,
+    };
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({ status: 200, json: release }),
+    );
+
+    const enriched = await actions.getLatestReleasesForRepos(
+      [repo],
+      baseSettings,
+      "en",
+      { skipCache: true },
+    );
+
+    expect(enriched[0].release?.tag_name).toBe("v1.2.3");
+    expect(vi.mocked(global.fetch).mock.calls[0][0]).toContain(
+      "/releases/permalink/latest",
+    );
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledOnce();
   });
 
   it("falls back to simpler tags endpoint when advanced ordering params are rejected", async () => {
@@ -168,46 +326,51 @@ describe("actions GitLab self-hosted fetcher", () => {
     const repo: Repository = {
       id: "gitlab:gitlab.self.test/group/repo",
       url: "https://gitlab.self.test/group/repo",
+      etag: 'W/"empty-releases"',
+      latestRelease: {
+        html_url: "https://gitlab.self.test/group/repo/-/tags/v1.0.0",
+        tag_name: "v1.0.0",
+        name: "Tag: v1.0.0",
+        body: "old tag",
+        created_at: "2024-01-01T00:00:00Z",
+        published_at: "2024-01-01T00:00:00Z",
+        source: "tag",
+      },
     };
 
-    // releases: empty -> tag fallback
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      json: async () => [],
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        headers: { etag: 'W/"still-empty"' },
+        json: [],
+      }),
+    );
 
-    // tags with order_by/sort rejected by older GitLab
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      statusText: "Bad Request",
-      headers: { get: () => null },
-      text: async () => "order_by is invalid",
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 400,
+        statusText: "Bad Request",
+        text: "order_by is invalid",
+      }),
+    );
 
-    // simpler tags endpoint works
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      json: async () => [
-        {
-          name: "v2.0.0",
-          commit: {
-            id: "abc123",
-            message: "release commit",
-            committed_date: new Date().toISOString(),
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        json: [
+          {
+            name: "v2.0.0",
+            commit: {
+              id: "abc123",
+              message: "release commit",
+              committed_date: new Date().toISOString(),
+            },
           },
-        },
-      ],
-    });
+        ],
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -218,17 +381,153 @@ describe("actions GitLab self-hosted fetcher", () => {
 
     expect(enriched[0].error).toBeUndefined();
     expect(enriched[0].release?.tag_name).toBe("v2.0.0");
+    expect(enriched[0].newEtag).toBeNull();
+    expect(
+      headerRecord(fetchCallHeaders(vi.mocked(global.fetch).mock.calls[0]))[
+        "If-None-Match"
+      ],
+    ).toBeUndefined();
 
-    // @ts-expect-error
     const urls = vi.mocked(global.fetch).mock.calls.map((call) => call[0]);
     expect(
-      urls.some((u: string) =>
-        u.includes("/repository/tags?per_page=1&order_by=updated&sort=desc"),
+      urls.some((u) =>
+        String(u).includes(
+          "/repository/tags?per_page=30&page=1&order_by=updated&sort=desc",
+        ),
       ),
     ).toBe(true);
     expect(
-      urls.some((u: string) => u.includes("/repository/tags?per_page=1")),
+      urls.some((u) =>
+        String(u).includes("/repository/tags?per_page=30&page=1"),
+      ),
     ).toBe(true);
+  });
+
+  it("rejects partial GitLab tag results when a later page fails", async () => {
+    process.env.GITLAB_ADDITIONAL_HOSTS = "gitlab.self.test";
+    const actions = await import("@/app/actions");
+    const repo: Repository = {
+      id: "gitlab:gitlab.self.test/group/repo",
+      url: "https://gitlab.self.test/group/repo",
+      releaseSelectionStrategy: "highest_version",
+      releasesPerPage: 101,
+    };
+    const firstPageTags = Array.from({ length: 100 }, (_, index) => ({
+      name: `v${index + 1}.0.0`,
+      commit: {
+        id: String(index + 1),
+        message: "release commit",
+        committed_date: "2024-01-01T00:00:00Z",
+      },
+    }));
+
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({ status: 200, json: [] }),
+    );
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({ status: 200, json: firstPageTags }),
+    );
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 500,
+        statusText: "Internal Server Error",
+        text: "failed",
+      }),
+    );
+
+    const enriched = await actions.getLatestReleasesForRepos(
+      [repo],
+      baseSettings,
+      "en",
+      { skipCache: true },
+    );
+
+    expect(enriched[0].release).toBeUndefined();
+    expect(enriched[0].error?.type).toBe("api_error");
+    expect(enriched[0].newEtag).toBeNull();
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses commit metadata when an API tag has no publication date", async () => {
+    process.env.GITLAB_ADDITIONAL_HOSTS = "gitlab.self.test";
+    process.env.GITLAB_ACCESS_TOKENS = "gitlab.self.test=glpat-self";
+    const actions = await import("@/app/actions");
+    const commitDate = "2020-02-03T04:05:06.000Z";
+    const repo: Repository = {
+      id: "gitlab:gitlab.self.test/group/repo",
+      url: "https://gitlab.self.test/group/repo",
+    };
+
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce(mockFetchResponse({ json: [] }))
+      .mockResolvedValueOnce(
+        mockFetchResponse({
+          json: [
+            {
+              name: "v1.2.3",
+              message: "tag message",
+              commit: { id: "abc123" },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockFetchResponse({
+          json: {
+            message: "commit message",
+            committed_date: commitDate,
+          },
+        }),
+      );
+
+    const enriched = await actions.getLatestReleasesForRepos(
+      [repo],
+      baseSettings,
+      "en",
+      { skipCache: true },
+    );
+
+    expect(enriched[0].release?.created_at).toBe(commitDate);
+    expect(enriched[0].release?.published_at).toBe(commitDate);
+    expect(enriched[0].release?.published_at_unknown).toBe(false);
+    expect(enriched[0].release?.body).toContain("tag message");
+  });
+
+  it("selects an older matching tag when the newest tag is filtered out", async () => {
+    process.env.GITLAB_ADDITIONAL_HOSTS = "gitlab.self.test";
+    const actions = await import("@/app/actions");
+    const repo: Repository = {
+      id: "gitlab:gitlab.self.test/group/repo",
+      url: "https://gitlab.self.test/group/repo",
+    };
+
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce(mockFetchResponse({ json: [] }))
+      .mockResolvedValueOnce(
+        mockFetchResponse({
+          json: [
+            {
+              name: "v2.0.0-beta",
+              message: "beta",
+              commit: { committed_date: "2026-01-02T00:00:00.000Z" },
+            },
+            {
+              name: "v1.9.0",
+              message: "stable",
+              commit: { committed_date: "2026-01-01T00:00:00.000Z" },
+            },
+          ],
+        }),
+      );
+
+    const enriched = await actions.getLatestReleasesForRepos(
+      [repo],
+      { ...baseSettings, releaseChannels: ["stable"] },
+      "en",
+      { skipCache: true },
+    );
+
+    expect(enriched[0].release?.tag_name).toBe("v1.9.0");
   });
 
   it("returns api_error when tag fallback endpoint fails", async () => {
@@ -240,25 +539,21 @@ describe("actions GitLab self-hosted fetcher", () => {
       url: "https://gitlab.self.test/group/repo",
     };
 
-    // releases: empty -> tag fallback
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      json: async () => [],
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        json: [],
+      }),
+    );
 
-    // tags endpoint failure
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 403,
-      statusText: "Forbidden",
-      headers: { get: () => null },
-      text: async () => "forbidden",
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 403,
+        statusText: "Forbidden",
+        text: "forbidden",
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -281,23 +576,22 @@ describe("actions GitLab self-hosted fetcher", () => {
       url: "https://gitlab.self.test/group/repo",
     };
 
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      json: async () => [
-        {
-          tag_name: "v1.2.3",
-          name: "v1.2.3",
-          description: "release body",
-          created_at: new Date().toISOString(),
-          released_at: new Date().toISOString(),
-          upcoming_release: false,
-        },
-      ],
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        json: [
+          {
+            tag_name: "v1.2.3",
+            name: "v1.2.3",
+            description: "release body",
+            created_at: new Date().toISOString(),
+            released_at: new Date().toISOString(),
+            upcoming_release: false,
+          },
+        ],
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -309,9 +603,9 @@ describe("actions GitLab self-hosted fetcher", () => {
     expect(enriched[0].error).toBeUndefined();
     expect(enriched[0].release?.tag_name).toBe("v1.2.3");
 
-    // @ts-expect-error
-    const [, requestOpts] = vi.mocked(global.fetch).mock.calls[0];
-    const authorizationHeader = requestOpts.headers.Authorization;
+    const authorizationHeader = headerRecord(
+      fetchCallHeaders(vi.mocked(global.fetch).mock.calls[0]),
+    ).Authorization;
     expect(typeof authorizationHeader).toBe("string");
     expect(authorizationHeader.startsWith("Basic ")).toBe(true);
   });
@@ -327,34 +621,30 @@ describe("actions GitLab self-hosted fetcher", () => {
       url: "https://gitlab.self.test/group/repo",
     };
 
-    // releases endpoint not accessible with deploy token on some instances
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => "",
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: "",
+      }),
+    );
 
-    // tags fallback succeeds
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      json: async () => [
-        {
-          name: "v2.3.4",
-          commit: {
-            id: "abc123",
-            message: "release commit",
-            committed_date: new Date().toISOString(),
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        json: [
+          {
+            name: "v2.3.4",
+            commit: {
+              id: "abc123",
+              message: "release commit",
+              committed_date: new Date().toISOString(),
+            },
           },
-        },
-      ],
-    });
+        ],
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -366,12 +656,12 @@ describe("actions GitLab self-hosted fetcher", () => {
     expect(enriched[0].error).toBeUndefined();
     expect(enriched[0].release?.tag_name).toBe("v2.3.4");
 
-    // @ts-expect-error
-    const firstAuth = vi.mocked(global.fetch).mock.calls[0][1].headers
-      .Authorization;
-    // @ts-expect-error
-    const secondAuth = vi.mocked(global.fetch).mock.calls[1][1].headers
-      .Authorization;
+    const firstAuth = headerRecord(
+      fetchCallHeaders(vi.mocked(global.fetch).mock.calls[0]),
+    ).Authorization;
+    const secondAuth = headerRecord(
+      fetchCallHeaders(vi.mocked(global.fetch).mock.calls[1]),
+    ).Authorization;
     expect(typeof firstAuth).toBe("string");
     expect(firstAuth.startsWith("Basic ")).toBe(true);
     expect(typeof secondAuth).toBe("string");
@@ -398,45 +688,37 @@ describe("actions GitLab self-hosted fetcher", () => {
       1_700_000_000,
     );
 
-    // releases endpoint -> 404
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => '{"message":"404 Project Not Found"}',
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: '{"message":"404 Project Not Found"}',
+      }),
+    );
 
-    // tags endpoint -> 404
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => '{"message":"404 Project Not Found"}',
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: '{"message":"404 Project Not Found"}',
+      }),
+    );
 
-    // git transport fallback -> success with one tag
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => new TextEncoder().encode(gitRefsBody).buffer,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: new TextEncoder().encode(gitRefsBody),
+      }),
+    );
 
-    // git transport commit metadata lookup
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => uploadPackResponse.buffer,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: uploadPackResponse,
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -452,16 +734,17 @@ describe("actions GitLab self-hosted fetcher", () => {
     expect(enriched[0].release?.published_at).toBe("2023-11-14T22:13:20.000Z");
     expect(enriched[0].release?.body).toContain("feat: release 1.0.0");
 
-    // @ts-expect-error
     const urls = vi.mocked(global.fetch).mock.calls.map((call) => call[0]);
     expect(
-      urls.some((url: string) =>
-        url.includes("/group/repo.git/info/refs?service=git-upload-pack"),
+      urls.some((url) =>
+        String(url).includes(
+          "/group/repo.git/info/refs?service=git-upload-pack",
+        ),
       ),
     ).toBe(true);
     expect(
-      urls.some((url: string) =>
-        url.includes("/group/repo.git/git-upload-pack"),
+      urls.some((url) =>
+        String(url).includes("/group/repo.git/git-upload-pack"),
       ),
     ).toBe(true);
   });
@@ -481,59 +764,47 @@ describe("actions GitLab self-hosted fetcher", () => {
       `${(line.length + 4).toString(16).padStart(4, "0")}${line}`;
     const commitSha = "6da1bcce308ad6958bbeba67a5f5e5c752a15b40";
     const gitRefsBody = `${pkt("# service=git-upload-pack\n")}0000${pkt(`${commitSha} refs/tags/1.0.0\n`)}0000`;
-    const invalidUploadPackResponse = new TextEncoder().encode(
-      "0008NAK\n0000",
-    ).buffer;
+    const invalidUploadPackResponse = new TextEncoder().encode("0008NAK\n0000");
 
-    // releases endpoint -> 404
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => '{"message":"404 Project Not Found"}',
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: '{"message":"404 Project Not Found"}',
+      }),
+    );
 
-    // tags endpoint -> 404
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => '{"message":"404 Project Not Found"}',
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: '{"message":"404 Project Not Found"}',
+      }),
+    );
 
-    // git transport refs fallback succeeds
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => new TextEncoder().encode(gitRefsBody).buffer,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: new TextEncoder().encode(gitRefsBody),
+      }),
+    );
 
-    // first git-upload-pack call returns non-parseable payload
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => invalidUploadPackResponse,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: invalidUploadPackResponse,
+      }),
+    );
 
-    // second git-upload-pack call also non-parseable
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => invalidUploadPackResponse,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: invalidUploadPackResponse,
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -571,55 +842,45 @@ describe("actions GitLab self-hosted fetcher", () => {
       1_701_000_000,
     );
 
-    // releases endpoint -> 404
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => '{"message":"404 Project Not Found"}',
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: '{"message":"404 Project Not Found"}',
+      }),
+    );
 
-    // tags endpoint -> 404
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      headers: { get: () => null },
-      text: async () => '{"message":"404 Project Not Found"}',
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 404,
+        statusText: "Not Found",
+        text: '{"message":"404 Project Not Found"}',
+      }),
+    );
 
-    // git transport refs fallback succeeds
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => new TextEncoder().encode(gitRefsBody).buffer,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: new TextEncoder().encode(gitRefsBody),
+      }),
+    );
 
-    // first metadata request fails
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      statusText: "Bad Request",
-      headers: { get: () => null },
-      text: async () => "unsupported filter",
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 400,
+        statusText: "Bad Request",
+        text: "unsupported filter",
+      }),
+    );
 
-    // second metadata request succeeds
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      headers: { get: () => null },
-      arrayBuffer: async () => uploadPackResponse.buffer,
-    });
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      mockFetchResponse({
+        status: 200,
+        statusText: "OK",
+        bytes: uploadPackResponse,
+      }),
+    );
 
     const enriched = await actions.getLatestReleasesForRepos(
       [repo],
@@ -636,7 +897,6 @@ describe("actions GitLab self-hosted fetcher", () => {
       "fix: fallback commit metadata",
     );
 
-    // @ts-expect-error
     const uploadPackCalls = vi
       .mocked(global.fetch)
       .mock.calls.filter(

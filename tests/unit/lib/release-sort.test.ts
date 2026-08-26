@@ -7,15 +7,17 @@ function release(
   date: string | null,
   isNew = false,
   body: string | null = null,
+  isPinned = false,
 ): EnrichedRelease {
   return {
     repoId,
-    repoUrl: `https://example.com/${repoId}`,
+    repoUrl: `https://example.test/${repoId}`,
     isNew,
+    repoSettings: { isPinned },
     release: date
       ? ({
           id: 1,
-          html_url: `https://example.com/${repoId}/releases/v1`,
+          html_url: `https://example.test/${repoId}/releases/v1`,
           tag_name: "v1",
           name: "v1",
           body,
@@ -98,6 +100,41 @@ describe("sortEnrichedReleases", () => {
     ]);
   });
 
+  it("keeps pinned repositories above security priority and the selected sort order", () => {
+    const input = [
+      release(
+        "github:owner/new-security",
+        "2024-03-01T00:00:00.000Z",
+        true,
+        "Security update for CVE-2024-12345.",
+      ),
+      release(
+        "github:owner/pinned-old",
+        "2024-01-01T00:00:00.000Z",
+        false,
+        null,
+        true,
+      ),
+      release(
+        "github:owner/pinned-new",
+        "2024-02-01T00:00:00.000Z",
+        false,
+        null,
+        true,
+      ),
+      release("github:owner/regular-new", "2024-04-01T00:00:00.000Z"),
+    ];
+
+    expect(
+      ids(sortEnrichedReleases(input, "latest_first", undefined, true)),
+    ).toEqual([
+      "github:owner/pinned-new",
+      "github:owner/pinned-old",
+      "github:owner/new-security",
+      "github:owner/regular-new",
+    ]);
+  });
+
   it("supports oldest-first and repository name ordering", () => {
     expect(
       ids(sortEnrichedReleases(releases, "oldest_first", undefined)),
@@ -143,5 +180,33 @@ describe("sortEnrichedReleases", () => {
       "github:owner/old",
       "unknown:owner/no-release",
     ]);
+  });
+
+  it("groups Forgejo with Codeberg and ignores its instance path for name sorting", () => {
+    const input = [
+      release(
+        "forgejo:forgejo.internal.test:3000/code/a-owner/repo",
+        "2024-03-01T00:00:00.000Z",
+      ),
+      release("gitlab:gitlab.com/b-owner/repo", "2024-02-01T00:00:00.000Z"),
+      release("codeberg:c-owner/repo", "2024-01-01T00:00:00.000Z"),
+    ];
+
+    expect(
+      ids(
+        sortEnrichedReleases(input, "provider_grouped", [
+          "codeberg",
+          "gitlab",
+          "github",
+        ]),
+      ),
+    ).toEqual([
+      "forgejo:forgejo.internal.test:3000/code/a-owner/repo",
+      "codeberg:c-owner/repo",
+      "gitlab:gitlab.com/b-owner/repo",
+    ]);
+    expect(ids(sortEnrichedReleases(input, "repo_az", undefined))[0]).toBe(
+      "forgejo:forgejo.internal.test:3000/code/a-owner/repo",
+    );
   });
 });

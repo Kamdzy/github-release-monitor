@@ -6,14 +6,19 @@ vi.mock("next-intl/server", () => ({
 }));
 
 import type { AppSettings, GithubRelease, Repository } from "@/types";
+import {
+  fetchCallBodyText,
+  installFetchMock,
+  mockFetchResponse,
+} from "../../helpers/fetch";
 
 describe("notifications/markdown limits", () => {
   const envBackup = { ...process.env };
   const fetchBackup = global.fetch;
 
   beforeEach(() => {
-    // @ts-expect-error
-    global.fetch = vi.fn();
+    installFetchMock();
+    process.env.BETTER_AUTH_URL = "http://localhost:3000";
   });
   afterEach(() => {
     process.env = { ...envBackup };
@@ -36,41 +41,45 @@ describe("notifications/markdown limits", () => {
     draft: false,
   };
 
-  it("when availableLength <= 0, body becomes view_on_github_link", async () => {
+  it("when no priority link fits, body still respects the limit", async () => {
     process.env.APPRISE_URL = "http://apprise.test";
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => "",
-    });
+    vi.mocked(global.fetch).mockResolvedValue(
+      mockFetchResponse({ status: 200, text: "" }),
+    );
     const { sendNotification } = await import("@/lib/notifications");
 
-    const settings = {
-      ...({} as AppSettings),
+    const settings: AppSettings = {
+      locale: "en",
+      refreshInterval: 10,
+      cacheInterval: 5,
+      releasesPerPage: 30,
+      parallelRepoFetches: 5,
+      releaseChannels: ["stable"],
       timeFormat: "24h",
       appriseMaxCharacters: 1,
-    }; // forces availableLength <= 0
+    }; // forces every complete priority link to exceed the limit
     const repoOverrides: Repository = { ...repo, appriseFormat: "markdown" };
     await sendNotification(repoOverrides, release, "en", settings);
 
     const call = vi.mocked(global.fetch).mock.calls[0];
-    const payload = JSON.parse(call[1].body);
-    expect(payload.body).toBe("view_on_github_link");
+    const payload = JSON.parse(fetchCallBodyText(call));
+    expect(payload.body.length).toBeLessThanOrEqual(1);
   });
 
-  it("when body shorter than limit, appends footer and link", async () => {
+  it("when body is shorter than the limit, appends the footer links", async () => {
     process.env.APPRISE_URL = "http://apprise.test";
-    // @ts-expect-error
-    vi.mocked(global.fetch).mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => "",
-    });
+    vi.mocked(global.fetch).mockResolvedValue(
+      mockFetchResponse({ status: 200, text: "" }),
+    );
     const { sendNotification } = await import("@/lib/notifications");
 
-    const settings = {
-      ...({} as AppSettings),
+    const settings: AppSettings = {
+      locale: "en",
+      refreshInterval: 10,
+      cacheInterval: 5,
+      releasesPerPage: 30,
+      parallelRepoFetches: 5,
+      releaseChannels: ["stable"],
       timeFormat: "24h",
       appriseMaxCharacters: 10000,
     }; // large limit
@@ -78,8 +87,10 @@ describe("notifications/markdown limits", () => {
     await sendNotification(repoOverrides, release, "en", settings);
 
     const call = vi.mocked(global.fetch).mock.calls[0];
-    const payload = JSON.parse(call[1].body);
+    const payload = JSON.parse(fetchCallBodyText(call));
     expect(payload.body).toContain("view_on_github_link");
+    expect(payload.body).toContain("view\\_monitor\\_label");
+    expect(payload.body).toContain("http://localhost:3000/en");
     expect(payload.body).toContain("---"); // footer separator present
   });
 });

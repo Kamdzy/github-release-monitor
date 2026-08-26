@@ -28,62 +28,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useNetworkStatus } from "@/hooks/use-network";
 import { authClient } from "@/lib/auth/client";
+import { hasCredentialProvider } from "@/lib/auth/client-accounts";
+import {
+  listAuthAccounts,
+  readAuthSessionSnapshot,
+} from "@/lib/auth/client-adapters";
+import { isolateLtrText } from "@/lib/bidi";
 import {
   isPasswordPolicyValid,
+  keepPasswordInputWhitespaceFree,
+  PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
 } from "@/lib/password-policy";
-
-interface AccountLike {
-  provider?: string | { id?: string | null; name?: string | null } | null;
-  providerId?: string | null;
-}
-
-function findAccountsArray(payload: unknown): AccountLike[] {
-  if (Array.isArray(payload)) {
-    return payload as AccountLike[];
-  }
-  if (!payload || typeof payload !== "object") {
-    return [];
-  }
-
-  const record = payload as Record<string, unknown>;
-  const nestedCandidates: unknown[] = [
-    record.data,
-    record.accounts,
-    record.result,
-    record.response,
-  ];
-  for (const candidate of nestedCandidates) {
-    if (Array.isArray(candidate)) {
-      return candidate as AccountLike[];
-    }
-    if (candidate && typeof candidate === "object") {
-      const nested = candidate as Record<string, unknown>;
-      if (Array.isArray(nested.accounts)) {
-        return nested.accounts as AccountLike[];
-      }
-      if (Array.isArray(nested.data)) {
-        return nested.data as AccountLike[];
-      }
-    }
-  }
-  return [];
-}
-
-function toProviderId(value: AccountLike): string {
-  const providerRaw =
-    typeof value.provider === "string"
-      ? value.provider
-      : value.provider?.id || value.provider?.name || "";
-  return String(value.providerId || providerRaw || "")
-    .trim()
-    .toLowerCase();
-}
-
-function hasCredentialProvider(payload: unknown): boolean {
-  const accounts = findAccountsArray(payload);
-  return accounts.some((account) => toProviderId(account) === "credential");
-}
 
 function isLikelyEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
@@ -93,16 +49,8 @@ export function AccountCredentialsSettingsCard() {
   const t = useTranslations("SettingsPage");
   const { isOnline } = useNetworkStatus();
   const sessionState = authClient.useSession();
-  const sessionData = (sessionState as { data?: unknown }).data as
-    | {
-        user?: {
-          email?: string | null;
-        };
-      }
-    | undefined;
-  const sessionLoading = Boolean(
-    (sessionState as { isPending?: unknown }).isPending,
-  );
+  const session = readAuthSessionSnapshot(sessionState);
+  const sessionLoading = session.isPending;
 
   const [emailInput, setEmailInput] = React.useState("");
   const [emailPending, setEmailPending] = React.useState(false);
@@ -131,22 +79,18 @@ export function AccountCredentialsSettingsCard() {
   const newPasswordId = React.useId();
   const confirmPasswordId = React.useId();
 
-  const currentEmailFromSession =
-    typeof sessionData?.user?.email === "string" ? sessionData.user.email : "";
+  const currentEmailFromSession = session.email;
   const passwordInputType = showPasswords ? "text" : "password";
   const passwordToggleLabel = showPasswords
     ? t("hide_password")
     : t("show_password");
   const currentEmail = (emailOverride ?? currentEmailFromSession ?? "").trim();
   const trimmedCurrentPassword = currentPassword.trim();
-  const trimmedNewPassword = newPassword.trim();
-  const trimmedConfirmPassword = confirmPassword.trim();
-  const newPasswordTouched = trimmedNewPassword.length > 0;
-  const confirmPasswordTouched = trimmedConfirmPassword.length > 0;
-  const newPasswordPolicyMet = isPasswordPolicyValid(trimmedNewPassword);
+  const newPasswordTouched = newPassword.length > 0;
+  const confirmPasswordTouched = confirmPassword.length > 0;
+  const newPasswordPolicyMet = isPasswordPolicyValid(newPassword);
   const passwordsMatch =
-    trimmedNewPassword.length > 0 &&
-    trimmedNewPassword === trimmedConfirmPassword;
+    newPassword.length > 0 && newPassword === confirmPassword;
   const currentPasswordRequirementMet =
     !hasPassword || trimmedCurrentPassword.length > 0;
   const currentPasswordMissingForChange =
@@ -154,7 +98,7 @@ export function AccountCredentialsSettingsCard() {
     (newPasswordTouched || confirmPasswordTouched) &&
     !currentPasswordRequirementMet;
   const newPasswordInputClass = [
-    "pr-10",
+    "pe-10",
     newPasswordTouched
       ? newPasswordPolicyMet
         ? "border-emerald-500 focus-visible:ring-emerald-500"
@@ -164,7 +108,7 @@ export function AccountCredentialsSettingsCard() {
     .filter(Boolean)
     .join(" ");
   const confirmPasswordInputClass = [
-    "pr-10",
+    "pe-10",
     confirmPasswordTouched
       ? passwordsMatch
         ? "border-emerald-500 focus-visible:ring-emerald-500"
@@ -211,7 +155,7 @@ export function AccountCredentialsSettingsCard() {
     let active = true;
     (async () => {
       try {
-        const response = await authClient.listAccounts();
+        const response = await listAuthAccounts();
         if (!active) return;
         setHasPassword(hasCredentialProvider(response));
       } catch {
@@ -267,7 +211,7 @@ export function AccountCredentialsSettingsCard() {
     setPasswordErrorKey(null);
     setPasswordSuccessKey(null);
 
-    if (newPassword.trim() !== confirmPassword.trim()) {
+    if (newPassword !== confirmPassword) {
       setPasswordPending(false);
       setPasswordErrorKey("account_password_confirm_mismatch");
       return;
@@ -320,7 +264,9 @@ export function AccountCredentialsSettingsCard() {
             <Mail className="h-4 w-4" />
             <span>
               {t("account_email_current_value", {
-                value: currentEmail || t("account_email_not_set"),
+                value: currentEmail
+                  ? isolateLtrText(currentEmail)
+                  : t("account_email_not_set"),
               })}
             </span>
           </div>
@@ -342,9 +288,9 @@ export function AccountCredentialsSettingsCard() {
                 aria-busy={emailPending}
               >
                 {emailPending ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  <Loader2 className="me-2 h-4 w-4 animate-spin" />
                 ) : (
-                  <Mail className="mr-2 h-4 w-4" />
+                  <Mail className="me-2 h-4 w-4" />
                 )}
                 {t("account_email_save_button")}
               </Button>
@@ -388,6 +334,7 @@ export function AccountCredentialsSettingsCard() {
               <div className="relative">
                 <Input
                   id={currentPasswordId}
+                  dir="ltr"
                   type={passwordInputType}
                   value={currentPassword}
                   onChange={(event) => setCurrentPassword(event.target.value)}
@@ -395,8 +342,8 @@ export function AccountCredentialsSettingsCard() {
                   autoComplete="current-password"
                   className={
                     !currentPasswordMissingForChange
-                      ? "pr-10"
-                      : "pr-10 border-destructive focus-visible:ring-destructive"
+                      ? "pe-10"
+                      : "pe-10 border-destructive focus-visible:ring-destructive"
                   }
                 />
                 <Button
@@ -425,12 +372,21 @@ export function AccountCredentialsSettingsCard() {
             <div className="relative">
               <Input
                 id={newPasswordId}
+                dir="ltr"
                 type={passwordInputType}
                 value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
+                onChange={(event) =>
+                  setNewPassword((currentValue) =>
+                    keepPasswordInputWhitespaceFree(
+                      currentValue,
+                      event.target.value,
+                    ),
+                  )
+                }
                 placeholder={t("account_password_new_placeholder")}
                 autoComplete="new-password"
                 minLength={PASSWORD_MIN_LENGTH}
+                maxLength={PASSWORD_MAX_LENGTH}
                 className={newPasswordInputClass}
               />
               <Button
@@ -460,12 +416,21 @@ export function AccountCredentialsSettingsCard() {
             <div className="relative">
               <Input
                 id={confirmPasswordId}
+                dir="ltr"
                 type={passwordInputType}
                 value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
+                onChange={(event) =>
+                  setConfirmPassword((currentValue) =>
+                    keepPasswordInputWhitespaceFree(
+                      currentValue,
+                      event.target.value,
+                    ),
+                  )
+                }
                 placeholder={t("account_password_confirm_placeholder")}
                 autoComplete="new-password"
                 minLength={PASSWORD_MIN_LENGTH}
+                maxLength={PASSWORD_MAX_LENGTH}
                 className={confirmPasswordInputClass}
               />
               <Button
@@ -498,9 +463,9 @@ export function AccountCredentialsSettingsCard() {
             aria-busy={passwordPending}
           >
             {passwordPending ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              <Loader2 className="me-2 h-4 w-4 animate-spin" />
             ) : (
-              <KeyRound className="mr-2 h-4 w-4" />
+              <KeyRound className="me-2 h-4 w-4" />
             )}
             {hasPassword
               ? t("account_password_change_button")

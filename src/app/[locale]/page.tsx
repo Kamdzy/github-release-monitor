@@ -1,18 +1,26 @@
+import { cookies } from "next/headers";
 import { getTranslations } from "next-intl/server";
-import { getUpdateNotificationState } from "@/app/actions";
 import { AutoRefresher } from "@/components/auto-refresher";
 import { BackToTopButton } from "@/components/back-to-top-button";
 import { Header } from "@/components/header";
 import { HomePageClient } from "@/components/home-page-client";
+import { normalizeLocale } from "@/i18n/config";
 import { getCurrentAuthAccess } from "@/lib/auth/access";
 import { logger } from "@/lib/logger";
+import { getNotificationRuntimeConfig } from "@/lib/notifications/config";
+import {
+  normalizeReleaseViewMode,
+  RELEASE_VIEW_MODE_COOKIE,
+} from "@/lib/release-view-mode";
+import { toCachedEnrichedRelease } from "@/lib/releases/cached-enriched-release";
+import { toPublicRepository } from "@/lib/repositories/public-repository";
+import { getUpdateNotificationStateOrFallback } from "@/lib/runtime/app-update-notice";
 import { getRepositories } from "@/lib/storage/repositories";
-import { getSettings } from "@/lib/storage/settings";
+import { createDefaultSettings, getSettings } from "@/lib/storage/settings";
 import type {
   AppSettings,
   EnrichedRelease,
   FetchError,
-  GithubRelease,
   Repository,
 } from "@/types";
 
@@ -22,7 +30,8 @@ export default async function HomePage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
-  const t = await getTranslations({ locale, namespace: "HomePage" });
+  const appLocale = normalizeLocale(locale);
+  const t = await getTranslations({ locale: appLocale, namespace: "HomePage" });
 
   let repositories: Repository[] = [];
   let releases: EnrichedRelease[] = [];
@@ -34,15 +43,21 @@ export default async function HomePage({
     Exclude<FetchError["type"], "not_modified">,
     number
   > | null = null;
-  const updateNotice = await getUpdateNotificationState();
-  const authAccess = await getCurrentAuthAccess();
+  const updateNoticePromise = getUpdateNotificationStateOrFallback();
+  const authAccessPromise = getCurrentAuthAccess();
+  const initialViewModePromise = cookies().then((cookieStore) =>
+    normalizeReleaseViewMode(cookieStore.get(RELEASE_VIEW_MODE_COOKIE)?.value),
+  );
+  const { isAppriseConfigured } = getNotificationRuntimeConfig();
 
   try {
-    settings = await getSettings();
-    repositories = await getRepositories();
+    [settings, repositories] = await Promise.all([
+      getSettings(),
+      getRepositories(),
+    ]);
     if (repositories.length > 0) {
       releases = repositories.map((repo) => {
-        // Handle package-type items differently
+        // Package (GHCR) items are represented via packageInfo, not a release.
         if (repo.type === "package") {
           return {
             repoId: repo.id,
@@ -58,58 +73,23 @@ export default async function HomePage({
             },
           };
         }
-
-        const cached = repo.latestRelease;
-        const reconstructedRelease: GithubRelease | undefined = cached
-          ? {
-              ...cached,
-              id: 0, // Cached releases might not have a full ID
-              prerelease: false, // This info isn't in CachedRelease
-              draft: false, // This info isn't in CachedRelease
-            }
-          : undefined;
-
-        return {
-          repoId: repo.id,
-          repoUrl: repo.url,
-          release: reconstructedRelease,
-          isNew: repo.isNew,
-          repoSettings: {
-            releaseChannels: repo.releaseChannels,
-            preReleaseSubChannels: repo.preReleaseSubChannels,
-            releasesPerPage: repo.releasesPerPage,
-            refreshInterval: repo.refreshInterval,
-            cacheInterval: repo.cacheInterval,
-            backgroundCheckCron: repo.backgroundCheckCron,
-            includeRegex: repo.includeRegex,
-            excludeRegex: repo.excludeRegex,
-            appriseTags: repo.appriseTags,
-            appriseFormat: repo.appriseFormat,
-          },
-          // No fetch, so no newEtag and no error
-          newEtag: repo.etag,
-        };
+        return toCachedEnrichedRelease(repo);
       });
+      repositories = repositories.map(toPublicRepository);
     }
   } catch (error: unknown) {
     logger
       .withScope("WebServer")
       .error("Failed to load repositories or releases:", error);
-    settings = {
-      timeFormat: "24h",
-      locale: "en",
-      refreshInterval: 10,
-      cacheInterval: 5,
-      releaseChannels: ["stable"],
-      releaseSortOrder: "latest_first",
-      providerSortOrder: ["github", "gitlab", "codeberg"],
-      prioritizeNewSecurityReleases: false,
-      showAcknowledge: true,
-      releasesPerPage: 30,
-      parallelRepoFetches: 1,
-    };
+    settings = createDefaultSettings();
     resolvedError = t("load_error");
   }
+
+  const [updateNotice, authAccess, initialViewMode] = await Promise.all([
+    updateNoticePromise,
+    authAccessPromise,
+    initialViewModePromise,
+  ]);
 
   return (
     <div className="min-h-screen w-full">
@@ -117,7 +97,7 @@ export default async function HomePage({
         <AutoRefresher intervalMinutes={settings.refreshInterval} />
       )}
       <Header
-        locale={locale}
+        locale={appLocale}
         updateNotice={updateNotice}
         authAccess={authAccess}
       />
@@ -130,8 +110,10 @@ export default async function HomePage({
           generalError={generalError}
           errorSummary={errorSummary}
           lastUpdated={lastUpdated}
-          locale={locale}
+          locale={appLocale}
+          initialViewMode={initialViewMode}
           canMutate={authAccess.canMutate}
+          isAppriseConfigured={isAppriseConfigured}
         />
       </main>
       <BackToTopButton />

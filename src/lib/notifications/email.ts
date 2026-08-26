@@ -1,64 +1,64 @@
-"use server";
-
 import { getTranslations } from "next-intl/server";
 import nodemailer from "nodemailer";
 import { remark } from "remark";
 import remarkGfm from "remark-gfm";
 import remarkHtml from "remark-html";
+import { getLocaleMetadata, type Locale } from "@/i18n/config";
+import { isolateAutoText, isolateLtrText } from "@/lib/bidi";
+import { formatAbsoluteDateTime } from "@/lib/date-time";
 import { logger } from "@/lib/logger";
+import {
+  getEmailRuntimeConfig,
+  getReleaseMonitorUrl,
+} from "@/lib/notifications/config";
+import {
+  escapeHtml,
+  escapeHtmlAttribute,
+  safeExternalUrl,
+} from "@/lib/notifications/content-safety";
+import {
+  renderReleaseDigestEmailHtml,
+  renderReleaseEmailHtml,
+} from "@/lib/notifications/email-html-template";
+import { sendEmailMessage } from "@/lib/notifications/email-transport";
+import { getServerTimeZone } from "@/lib/server-time-zone";
 import type { GithubRelease, Repository, TagDigest, TimeFormat } from "@/types";
+
+export type ReleaseNotificationItem = {
+  repository: Repository;
+  release: GithubRelease;
+};
 
 export async function getFormattedDate(
   date: Date,
-  locale: string,
+  locale: Locale,
   timeFormat: TimeFormat,
 ): Promise<{ textDate: string; htmlDate: string }> {
-  const t = await getTranslations({ locale, namespace: "Email" });
-
-  const textDateFormattingOptions: Intl.DateTimeFormatOptions = {
+  const timeZone = getServerTimeZone();
+  const commonFormat: Intl.DateTimeFormatOptions = {
     year: "numeric",
     month: "long",
     day: "numeric",
-    hour: "numeric",
-    minute: "numeric",
-    second: "numeric",
-    timeZoneName: "short",
-    hour12: timeFormat === "12h",
-  };
-  const textFormattingLocale =
-    locale === "de" ? "de-DE" : timeFormat === "12h" ? "en-US" : "en-GB";
-  const textDate = date.toLocaleString(
-    textFormattingLocale,
-    textDateFormattingOptions,
-  );
-
-  const htmlTimeOptions: Intl.DateTimeFormatOptions = {
     hour: "numeric",
     minute: "2-digit",
-    second: "2-digit",
+    second: "numeric",
     timeZoneName: "short",
-    hour12: timeFormat === "12h",
   };
-  const htmlDatePartsOptions: Intl.DateTimeFormatOptions = {
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  };
-  const dateParts = new Intl.DateTimeFormat(locale, htmlDatePartsOptions)
-    .formatToParts(date)
-    .reduce<Record<string, string>>((acc, part) => {
-      acc[part.type] = part.value;
-      return acc;
-    }, {});
-  const timeString = new Intl.DateTimeFormat(locale, htmlTimeOptions).format(
-    date,
-  );
-
-  const htmlDate =
-    timeFormat === "12h"
-      ? `${dateParts.weekday}, ${dateParts.month} ${dateParts.day}, ${dateParts.year} ${t("html_date_conjunction_at")} ${timeString}`
-      : `${dateParts.weekday}, ${dateParts.day}. ${dateParts.month} ${dateParts.year}, ${timeString}`;
+  const textDate = formatAbsoluteDateTime(date, {
+    locale,
+    timeFormat,
+    timeZone,
+    format: commonFormat,
+  });
+  const htmlDate = formatAbsoluteDateTime(date, {
+    locale,
+    timeFormat,
+    timeZone,
+    format: {
+      ...commonFormat,
+      weekday: "long",
+    },
+  });
 
   return { textDate, htmlDate };
 }
@@ -66,8 +66,10 @@ export async function getFormattedDate(
 export async function generatePlainTextReleaseBody(
   release: GithubRelease,
   repository: Repository,
-  locale: string,
+  locale: Locale,
   timeFormat: TimeFormat,
+  includeReleaseNotes = true,
+  includeLinks = true,
 ): Promise<string> {
   const t = await getTranslations({ locale, namespace: "Email" });
   const { htmlDate } = await getFormattedDate(
@@ -75,225 +77,145 @@ export async function generatePlainTextReleaseBody(
     locale,
     timeFormat,
   );
+  const releaseName = release.name || "N/A";
+  const links = includeLinks
+    ? await generatePlainTextReleaseLinks(release, locale)
+    : "";
 
   return `
-${t("text_new_version_of", { repoId: repository.id })}
+${t("text_new_version_of", { repoId: isolateLtrText(repository.id) })}
 
-${t("text_version_label")}: ${release.tag_name}
-${t("text_release_name_label")}: ${release.name || "N/A"}
-${t("text_release_date_label")}: ${htmlDate}
+${t("text_version_label")}: ${isolateLtrText(release.tag_name)}
+${t("text_release_name_label")}: ${isolateAutoText(releaseName)}
+${t("text_release_date_label")}: ${isolateAutoText(htmlDate)}
 
-${t("text_release_notes_label")}:
-${release.body || t("text_no_notes")}
+${
+  includeReleaseNotes
+    ? `${t("text_release_notes_label")}:
+${release.body ? isolateAutoText(release.body) : t("text_no_notes")}
 
-${t("text_view_on_github_label")}: ${release.html_url}
+`
+    : ""
+}${links ? `\n${links}` : ""}
 `;
+}
+
+export async function generatePlainTextReleaseLinks(
+  release: GithubRelease,
+  locale: Locale,
+): Promise<string> {
+  return (await generatePlainTextReleaseLinkLines(release, locale)).join("\n");
+}
+
+export async function generatePlainTextReleaseLinkLines(
+  release: GithubRelease,
+  locale: Locale,
+): Promise<string[]> {
+  const t = await getTranslations({ locale, namespace: "Email" });
+  const monitorUrl = getReleaseMonitorUrl(locale);
+  return [
+    `${t("text_view_on_github_label")}: ${isolateLtrText(release.html_url)}`,
+    monitorUrl
+      ? `${t("view_monitor_label")}: ${isolateLtrText(monitorUrl)}`
+      : undefined,
+  ].filter((line): line is string => line !== undefined);
 }
 
 export async function generateHtmlReleaseBody(
   release: GithubRelease,
   repository: Repository,
-  locale: string,
+  locale: Locale,
   timeFormat: TimeFormat,
+  includeReleaseNotes = true,
 ): Promise<string> {
   const t = await getTranslations({ locale, namespace: "Email" });
   const subject = t("subject", {
-    repoId: repository.id,
-    tagName: release.tag_name,
+    repoId: isolateLtrText(repository.id),
+    tagName: isolateLtrText(release.tag_name),
   });
+  const subjectHtml = escapeHtml(subject);
   const { htmlDate } = await getFormattedDate(
     new Date(release.created_at),
     locale,
     timeFormat,
   );
-
-  const releaseBodyHtml = release.body
-    ? String(
-        await remark().use(remarkGfm).use(remarkHtml).process(release.body),
-      )
-    : `<p style="font-style: italic;">${t("html_no_notes")}</p>`;
-
-  const repoLink = `<a href="${repository.url}" style="color: #8c9fe8; text-decoration: none;"><strong style="color: #fafafa;">${repository.id}</strong></a>`;
-  const introHtml = t("html_intro", { repoId: "REPO_PLACEHOLDER" }).replace(
-    "REPO_PLACEHOLDER",
-    repoLink,
+  const safeLocale = escapeHtmlAttribute(locale);
+  const safeDirection = escapeHtmlAttribute(
+    getLocaleMetadata(locale).direction,
   );
+  const safeRepoId = escapeHtml(repository.id);
+  const safeRepoUrl = escapeHtmlAttribute(safeExternalUrl(repository.url));
+  const safeReleaseTagName = escapeHtml(release.tag_name);
+  const safeReleaseName = escapeHtml(release.name || "N/A");
+  const safeReleaseUrl = escapeHtmlAttribute(safeExternalUrl(release.html_url));
+  const monitorUrl = getReleaseMonitorUrl(locale);
+  const safeMonitorUrl = monitorUrl
+    ? escapeHtmlAttribute(safeExternalUrl(monitorUrl))
+    : undefined;
+  const safeHtmlDate = escapeHtml(htmlDate);
 
-  return `
-    <!DOCTYPE html>
-    <html lang="${locale}">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <meta name="color-scheme" content="dark">
-      <meta name="supported-color-schemes" content="dark">
-      <title>${subject}</title>
-      <style>
-        :root {
-          color-scheme: dark;
-        }
-        body {
-          margin: 0;
-          padding: 0;
-          width: 100%;
-          background-color: #0d1117;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
-          color: #c9d1d9;
-          line-height: 1.6;
-        }
-        .container {
-          background-color: #101928;
-          padding: 20px;
-          max-width: 680px;
-          margin: 20px auto;
-          border-radius: 8px;
-          border: 1px solid #30363d;
-        }
-        .release-notes-container {
-          background-color: #0d1117;
-          border: 1px solid #30363d;
-          border-radius: 6px;
-          padding: 1px 16px;
-        }
-        h1, h2, h3, h4, h5, h6 {
-          color: #fafafa;
-          margin-top: 24px;
-          margin-bottom: 16px;
-          font-weight: 600;
-        }
-        p {
-          margin-top: 0;
-          margin-bottom: 16px;
-        }
-        ul, ol {
-          margin-top: 0;
-          margin-bottom: 16px;
-          padding-left: 2em;
-        }
-        li {
-          margin-bottom: 4px;
-        }
-        a {
-          color: #8c9fe8;
-          text-decoration: none;
-        }
-        a:hover {
-          text-decoration: underline;
-        }
-        pre {
-          display: block;
-          background-color: #161b22;
-          color: #c9d1d9;
-          padding: 16px;
-          margin: 16px 0;
-          border-radius: 6px;
-          overflow-x: auto;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-          font-size: 14px;
-          line-height: 1.45;
-          word-break: normal;
-          word-wrap: normal;
-        }
-        code {
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-          font-size: 85%;
-        }
-        pre code {
-          background-color: transparent;
-          padding: 0;
-          margin: 0;
-          border-radius: 0;
-        }
-        code:not(pre code) {
-           background-color: #30363d;
-           padding: 0.2em 0.4em;
-           margin: 0;
-           border-radius: 6px;
-           word-break: break-all;
-        }
-        blockquote {
-          border-left: 4px solid #30363d;
-          padding-left: 16px;
-          color: #8b949e;
-          margin: 0 0 16px;
-        }
-        table {
-          width: 100%;
-          border-collapse: collapse;
-          border-spacing: 0;
-          display: block;
-          overflow: auto;
-        }
-        th, td {
-          padding: 6px 13px;
-          border: 1px solid #30363d;
-        }
-        tr {
-          background-color: transparent;
-          border-top: 1px solid #30363d;
-        }
-        hr {
-          border: 0;
-          border-top: 1px solid #30363d;
-          margin: 24px 0;
-        }
-        .button {
-          display: inline-block;
-          background-color: #24292f;
-          color: #ffffff;
-          padding: 10px 20px;
-          text-decoration: none;
-          border-radius: 5px;
-          font-weight: 500;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h2>${t("html_title", { repoId: repository.id, tagName: release.tag_name })}</h2>
-        <p>${introHtml}</p>
-        <ul style="padding-left: 20px; margin-top: 16px; margin-bottom: 24px;">
-          <li><strong style="color: #fafafa;">${t("html_list_version_label")}</strong> ${release.tag_name}</li>
-          <li><strong style="color: #fafafa;">${t("html_list_name_label")}</strong> ${release.name || "N/A"}</li>
-          <li><strong style="color: #fafafa;">${t("html_list_date_label")}</strong> ${htmlDate}</li>
-        </ul>
-        <h3>${t("html_notes_title")}</h3>
-        <div class="release-notes-container">
-          ${releaseBodyHtml}
-        </div>
-        <p style="margin-top: 24px;">
-          <a href="${release.html_url}" class="button">
-            ${t("html_button_text")}
-          </a>
-        </p>
-      </div>
-    </body>
-    </html>
-  `;
+  const releaseBodyHtml = includeReleaseNotes
+    ? release.body
+      ? String(
+          await remark()
+            .use(remarkGfm)
+            .use(remarkHtml, { sanitize: true })
+            .process(release.body),
+        )
+      : `<p style="font-style: italic;">${escapeHtml(t("html_no_notes"))}</p>`
+    : undefined;
+
+  const repoLink = `<a href="${safeRepoUrl}" style="color: #8c9fe8; text-decoration: none;"><strong style="color: #fafafa;"><bdi dir="ltr" style="direction: ltr; unicode-bidi: isolate;">${safeRepoId}</bdi></strong></a>`;
+  const introHtml = t("html_intro", {
+    repoId: "REPO_PLACEHOLDER",
+  }).replaceAll("REPO_PLACEHOLDER", () => repoLink);
+  const titleRepoHtml = `<bdi dir="ltr" class="technical-value" style="direction: ltr; unicode-bidi: isolate;">${safeRepoId}</bdi>`;
+  const titleTagHtml = `<bdi dir="ltr" class="technical-value" style="direction: ltr; unicode-bidi: isolate;">${safeReleaseTagName}</bdi>`;
+  const titleHtml = escapeHtml(
+    t("html_title", {
+      repoId: "TITLE_REPO_PLACEHOLDER",
+      tagName: "TITLE_TAG_PLACEHOLDER",
+    }),
+  )
+    .replaceAll("TITLE_REPO_PLACEHOLDER", () => titleRepoHtml)
+    .replaceAll("TITLE_TAG_PLACEHOLDER", () => titleTagHtml);
+
+  return renderReleaseEmailHtml({
+    buttonTextHtml: escapeHtml(t("html_button_text")),
+    directionAttribute: safeDirection,
+    introHtml,
+    listDateLabelHtml: escapeHtml(t("html_list_date_label")),
+    listNameLabelHtml: escapeHtml(t("html_list_name_label")),
+    listVersionLabelHtml: escapeHtml(t("html_list_version_label")),
+    localeAttribute: safeLocale,
+    monitorButtonTextHtml: safeMonitorUrl
+      ? escapeHtml(t("view_monitor_label"))
+      : undefined,
+    monitorUrlAttribute: safeMonitorUrl,
+    notesTitleHtml: escapeHtml(t("html_notes_title")),
+    releaseBodyHtml,
+    releaseDateHtml: safeHtmlDate,
+    releaseNameHtml: safeReleaseName,
+    releaseTagNameHtml: safeReleaseTagName,
+    releaseUrlAttribute: safeReleaseUrl,
+    subjectHtml,
+    titleHtml,
+  });
 }
 
 export async function sendNewReleaseEmail(
   repository: Repository,
   release: GithubRelease,
-  locale: string,
+  locale: Locale,
   timeFormat: TimeFormat,
   toAddress?: string,
+  includeReleaseNotes = true,
 ) {
   const t = await getTranslations({ locale, namespace: "Email" });
 
-  const {
-    MAIL_HOST,
-    MAIL_PORT,
-    MAIL_USERNAME,
-    MAIL_PASSWORD,
-    MAIL_FROM_ADDRESS,
-    MAIL_FROM_NAME,
-    MAIL_TO_ADDRESS,
-  } = process.env;
+  const emailConfig = getEmailRuntimeConfig(process.env, toAddress);
 
-  const recipient = toAddress || MAIL_TO_ADDRESS;
-
-  if (!MAIL_HOST || !MAIL_PORT || !MAIL_FROM_ADDRESS || !recipient) {
+  if (!emailConfig.isComplete) {
     logger
       .withScope("Email")
       .warn(
@@ -302,48 +224,43 @@ export async function sendNewReleaseEmail(
     throw new Error(t("error_config_incomplete"));
   }
 
-  const port = parseInt(MAIL_PORT, 10);
-
-  const transporter = nodemailer.createTransport({
-    host: MAIL_HOST,
-    port: port,
-    secure: port === 465,
-    auth: {
-      user: MAIL_USERNAME,
-      pass: MAIL_PASSWORD,
-    },
-  });
-
   const subject = t("subject", {
-    repoId: repository.id,
-    tagName: release.tag_name,
+    repoId: isolateLtrText(repository.id),
+    tagName: isolateLtrText(release.tag_name),
   });
   const textBody = await generatePlainTextReleaseBody(
     release,
     repository,
     locale,
     timeFormat,
+    includeReleaseNotes,
   );
   const htmlBody = await generateHtmlReleaseBody(
     release,
     repository,
     locale,
     timeFormat,
+    includeReleaseNotes,
   );
 
   try {
-    await transporter.sendMail({
-      from: `"${MAIL_FROM_NAME || t("from_name_fallback")}" <${MAIL_FROM_ADDRESS}>`,
-      to: recipient,
-      subject: subject,
-      text: textBody,
-      html: htmlBody,
-    });
-    logger
-      .withScope("Email")
-      .info(
-        `Email notification sent to ${recipient} for ${repository.id} ${release.tag_name}`,
-      );
+    await sendEmailMessage(
+      {
+        host: emailConfig.host,
+        port: emailConfig.port,
+        username: emailConfig.username,
+        password: emailConfig.password,
+        tlsRejectUnauthorized: emailConfig.tlsRejectUnauthorized,
+      },
+      {
+        fromName: emailConfig.fromName || t("from_name_fallback"),
+        fromAddress: emailConfig.fromAddress,
+        to: emailConfig.recipient,
+        subject,
+        text: textBody,
+        html: htmlBody,
+      },
+    );
   } catch (error: unknown) {
     logger
       .withScope("Email")
@@ -354,14 +271,156 @@ export async function sendNewReleaseEmail(
   }
 }
 
+export async function generatePlainTextReleaseDigestBody(
+  items: ReleaseNotificationItem[],
+  locale: Locale,
+  timeFormat: TimeFormat,
+  includeReleaseNotes = true,
+): Promise<string> {
+  const t = await getTranslations({ locale, namespace: "Email" });
+  const sections = await Promise.all(
+    items.map(async ({ repository, release }) => {
+      const { textDate } = await getFormattedDate(
+        new Date(release.created_at),
+        locale,
+        timeFormat,
+      );
+      return [
+        `${isolateLtrText(repository.id)} — ${isolateLtrText(release.tag_name)}`,
+        `${t("text_release_name_label")}: ${isolateAutoText(release.name || "N/A")}`,
+        `${t("text_release_date_label")}: ${isolateAutoText(textDate)}`,
+        ...(includeReleaseNotes
+          ? [
+              `${t("text_release_notes_label")}:`,
+              release.body ? isolateAutoText(release.body) : t("text_no_notes"),
+            ]
+          : []),
+        `${t("text_view_on_github_label")}: ${isolateLtrText(release.html_url)}`,
+      ].join("\n");
+    }),
+  );
+  const monitorUrl = getReleaseMonitorUrl(locale);
+  return [
+    t("digest_intro", { count: items.length }),
+    ...sections,
+    monitorUrl
+      ? `${t("view_monitor_label")}: ${isolateLtrText(monitorUrl)}`
+      : undefined,
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join("\n\n");
+}
+
+export async function generateHtmlReleaseDigestBody(
+  items: ReleaseNotificationItem[],
+  locale: Locale,
+  timeFormat: TimeFormat,
+  includeReleaseNotes = true,
+): Promise<string> {
+  const t = await getTranslations({ locale, namespace: "Email" });
+  const subject = t("digest_subject", { count: items.length });
+  const entriesHtml = (
+    await Promise.all(
+      items.map(async ({ repository, release }) => {
+        const { htmlDate } = await getFormattedDate(
+          new Date(release.created_at),
+          locale,
+          timeFormat,
+        );
+        const notesHtml = includeReleaseNotes
+          ? release.body
+            ? String(
+                await remark()
+                  .use(remarkGfm)
+                  .use(remarkHtml, { sanitize: true })
+                  .process(release.body),
+              )
+            : `<p><em>${escapeHtml(t("html_no_notes"))}</em></p>`
+          : undefined;
+        return `<section class="release">
+          <h3><a href="${escapeHtmlAttribute(safeExternalUrl(repository.url))}"><bdi dir="ltr" class="technical-value">${escapeHtml(repository.id)}</bdi></a> — <bdi dir="ltr" class="technical-value">${escapeHtml(release.tag_name)}</bdi></h3>
+          <ul>
+            <li><strong>${escapeHtml(t("html_list_name_label"))}</strong> <bdi dir="auto">${escapeHtml(release.name || "N/A")}</bdi></li>
+            <li><strong>${escapeHtml(t("html_list_date_label"))}</strong> <bdi dir="auto">${escapeHtml(htmlDate)}</bdi></li>
+          </ul>
+          ${notesHtml === undefined ? "" : `<h4>${escapeHtml(t("html_notes_title"))}</h4><div class="notes" dir="auto">${notesHtml}</div>`}
+          <p><a href="${escapeHtmlAttribute(safeExternalUrl(release.html_url))}" class="button">${escapeHtml(t("html_button_text"))}</a></p>
+        </section>`;
+      }),
+    )
+  ).join("\n");
+  const monitorUrl = getReleaseMonitorUrl(locale);
+  return renderReleaseDigestEmailHtml({
+    directionAttribute: escapeHtmlAttribute(
+      getLocaleMetadata(locale).direction,
+    ),
+    entriesHtml,
+    introHtml: escapeHtml(t("digest_intro", { count: items.length })),
+    localeAttribute: escapeHtmlAttribute(locale),
+    monitorButtonTextHtml: monitorUrl
+      ? escapeHtml(t("view_monitor_label"))
+      : undefined,
+    monitorUrlAttribute: monitorUrl
+      ? escapeHtmlAttribute(safeExternalUrl(monitorUrl))
+      : undefined,
+    subjectHtml: escapeHtml(subject),
+  });
+}
+
+export async function sendReleaseDigestEmail(
+  items: ReleaseNotificationItem[],
+  locale: Locale,
+  timeFormat: TimeFormat,
+  includeReleaseNotes = true,
+) {
+  if (items.length === 0) return;
+  const t = await getTranslations({ locale, namespace: "Email" });
+  const emailConfig = getEmailRuntimeConfig(process.env);
+  if (!emailConfig.isComplete) throw new Error(t("error_config_incomplete"));
+  const subject = t("digest_subject", { count: items.length });
+  try {
+    await sendEmailMessage(
+      {
+        host: emailConfig.host,
+        port: emailConfig.port,
+        username: emailConfig.username,
+        password: emailConfig.password,
+        tlsRejectUnauthorized: emailConfig.tlsRejectUnauthorized,
+      },
+      {
+        fromName: emailConfig.fromName || t("from_name_fallback"),
+        fromAddress: emailConfig.fromAddress,
+        to: emailConfig.recipient,
+        subject,
+        text: await generatePlainTextReleaseDigestBody(
+          items,
+          locale,
+          timeFormat,
+          includeReleaseNotes,
+        ),
+        html: await generateHtmlReleaseDigestBody(
+          items,
+          locale,
+          timeFormat,
+          includeReleaseNotes,
+        ),
+      },
+    );
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(t("error_send_failed", { details: message }));
+  }
+}
+
 export async function sendTestEmail(
   repository: Repository,
   release: GithubRelease,
-  locale: string,
+  locale: Locale,
   timeFormat: TimeFormat,
   toAddress?: string,
+  includeReleaseNotes = true,
 ) {
-  const recipient = toAddress || process.env.MAIL_TO_ADDRESS;
+  const recipient = getEmailRuntimeConfig(process.env, toAddress).recipient;
   logger.withScope("Email").info(`Sending test email to ${recipient}...`);
   return sendNewReleaseEmail(
     repository,
@@ -369,6 +428,7 @@ export async function sendTestEmail(
     locale,
     timeFormat,
     recipient,
+    includeReleaseNotes,
   );
 }
 
@@ -376,7 +436,7 @@ export async function sendTestEmail(
 export async function sendPackageUpdateEmail(
   repository: Repository,
   changedTags: TagDigest[],
-  locale: string,
+  locale: Locale,
   timeFormat: TimeFormat,
   toAddress?: string,
 ): Promise<void> {

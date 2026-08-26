@@ -1,10 +1,8 @@
 "use client";
 
-import { format } from "date-fns";
 import {
   AlertTriangle,
   Bell,
-  CheckCircle2,
   Eye,
   EyeOff,
   Loader2,
@@ -12,22 +10,13 @@ import {
   PackagePlus,
   RefreshCw,
   Workflow,
-  XCircle,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
-import * as React from "react";
-
-import {
-  checkAppriseStatusAction,
-  sendTestAppriseAction,
-  sendTestApprisePackageAction,
-  sendTestEmailAction,
-  setupTestRepositoryAction,
-  triggerAppUpdateCheckAction,
-  triggerReleaseCheckAction,
-} from "@/app/actions";
+import { SecretRevealDialog } from "@/components/diagnostics/secret-reveal-dialog";
+import { StatusIndicator } from "@/components/diagnostics/status-indicator";
 import {
   CodebergBrandIcon,
+  ForgejoBrandIcon,
   GithubBrandIcon,
   GitlabBrandIcon,
 } from "@/components/icons/simple-brand-icon";
@@ -41,518 +30,100 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useNetworkStatus } from "@/hooks/use-network";
-import { useToast } from "@/hooks/use-toast";
-import { reloadIfServerActionStale } from "@/lib/server-action-error";
+import {
+  type TestPageClientProps,
+  useTestPageController,
+} from "@/components/use-test-page-controller";
+import { isolateLtrText } from "@/lib/bidi";
 import { cn } from "@/lib/utils";
-import type {
-  AppriseStatus,
-  CodebergTokenCheckResult,
-  GitlabTokenCheckResult,
-  NotificationConfig,
-  RateLimitResult,
-  UpdateNotificationState,
-} from "@/types";
-
-interface TestPageClientProps {
-  rateLimitResult: RateLimitResult;
-  isTokenSet: boolean;
-  gitlabTokenCheck: GitlabTokenCheckResult;
-  codebergTokenCheck: CodebergTokenCheckResult;
-  notificationConfig: NotificationConfig;
-  appriseStatus: AppriseStatus;
-  updateNotice: UpdateNotificationState;
-}
-
-function StatusIndicator({
-  status,
-  text,
-}: {
-  status: "success" | "warning" | "error";
-  text: string;
-}) {
-  const icons = {
-    success: CheckCircle2,
-    warning: AlertTriangle,
-    error: XCircle,
-  };
-  const colors = {
-    success: "text-green-500",
-    warning: "text-yellow-500",
-    error: "text-destructive",
-  };
-
-  const Icon = icons[status];
-  const color = colors[status];
-
-  return (
-    <div className="flex items-center gap-2">
-      <Icon className={`size-5 shrink-0 ${color}`} />
-      <span className="font-medium">{text}</span>
-    </div>
-  );
-}
 
 export function TestPageClient({
   rateLimitResult,
   isTokenSet,
   gitlabTokenCheck,
   codebergTokenCheck,
+  forgejoTokenChecks,
   notificationConfig,
   appriseStatus: initialAppriseStatus,
   updateNotice: initialUpdateNotice,
+  timeFormat,
 }: TestPageClientProps) {
   const t = useTranslations("TestPage");
-  const [isSendingMail, startMailTransition] = React.useTransition();
-  const [isSettingUpRepo, startSetupRepoTransition] = React.useTransition();
-  const [isTriggeringCheck, startTriggerCheckTransition] =
-    React.useTransition();
-  const [isSendingApprise, startAppriseTransition] = React.useTransition();
-  const [isSendingApprisePackage, startApprisePackageTransition] =
-    React.useTransition();
-  const [isCheckingApprise, startAppriseCheckTransition] =
-    React.useTransition();
-  const [isCheckingUpdate, startUpdateTransition] = React.useTransition();
-
-  const { toast } = useToast();
-  const [resetTime, setResetTime] = React.useState(t("not_available"));
-  const [isPasswordVisible, setIsPasswordVisible] = React.useState(false);
-  const [customEmail, setCustomEmail] = React.useState("");
-  const [isEmailInvalid, setIsEmailInvalid] = React.useState(false);
-  const [appriseStatus, setAppriseStatus] =
-    React.useState(initialAppriseStatus);
-  const [updateNotice, setUpdateNotice] = React.useState(initialUpdateNotice);
-  const emailInputId = React.useId();
-
-  const rateLimitData = rateLimitResult.data;
-  const rateLimitError = rateLimitResult.error;
-  const rateLimit = rateLimitData?.rate;
-  const { isOnline } = useNetworkStatus();
-
-  const isRateLimitHigh = rateLimit ? rateLimit.limit > 1000 : false;
-  const requiredMailVars = [
-    "MAIL_HOST",
-    "MAIL_PORT",
-    "MAIL_FROM_ADDRESS",
-    "MAIL_TO_ADDRESS",
-  ];
-  const formattedLastChecked = React.useMemo(() => {
-    if (!updateNotice.lastCheckedAt) {
-      return t("update_last_checked_never");
-    }
-
-    const date = new Date(updateNotice.lastCheckedAt);
-    if (Number.isNaN(date.getTime())) {
-      return t("update_last_checked_never");
-    }
-
-    return t("update_last_checked", {
-      time: format(date, "yyyy-MM-dd HH:mm:ss"),
-    });
-  }, [updateNotice.lastCheckedAt, t]);
-
-  const updateStatus = React.useMemo(() => {
-    if (updateNotice.lastCheckError) {
-      return {
-        status: "error" as const,
-        text: t("update_error_status", { error: updateNotice.lastCheckError }),
-      };
-    }
-
-    if (updateNotice.shouldNotify) {
-      return {
-        status: "warning" as const,
-        text: t("update_available_status", {
-          version: updateNotice.latestVersion ?? t("not_available"),
-        }),
-      };
-    }
-
-    return {
-      status: "success" as const,
-      text: t("update_not_available_status"),
-    };
-  }, [
-    updateNotice.lastCheckError,
-    updateNotice.shouldNotify,
-    updateNotice.latestVersion,
-    t,
-  ]);
-
-  const latestVersionText = updateNotice.latestVersion
-    ? t("update_latest_known", { version: updateNotice.latestVersion })
-    : t("update_latest_known_none");
-
-  React.useEffect(() => {
-    if (rateLimit) {
-      // Format the time on the client to avoid hydration mismatch
-      const clientFormattedTime = format(
-        new Date(rateLimit.reset * 1000),
-        "HH:mm:ss",
-      );
-      setResetTime(clientFormattedTime);
-    }
-  }, [rateLimit]);
-
-  const isGitlabTokenSet = gitlabTokenCheck.status !== "not_set";
-  const gitlabTokenStatusText = isGitlabTokenSet
-    ? t("gitlab_token_set")
-    : t("gitlab_token_not_set");
-  const gitlabTokenStatus: "success" | "warning" = isGitlabTokenSet
-    ? "success"
-    : "warning";
-
-  const gitlabAuthStatus = (() => {
-    switch (gitlabTokenCheck.status) {
-      case "not_set":
-        return { status: "warning" as const, text: t("unauth_access") };
-      case "valid":
-        return gitlabTokenCheck.diagnosticsLimited
-          ? {
-              status: "warning" as const,
-              text: t("gitlab_token_valid_limited"),
-            }
-          : { status: "success" as const, text: t("auth_access_confirmed") };
-      case "invalid_token":
-        return { status: "error" as const, text: t("gitlab_token_invalid") };
-      case "api_error":
-        return {
-          status: "error" as const,
-          text: t("gitlab_token_check_error"),
-        };
-    }
-  })();
-
-  const gitlabDetails: React.ReactNode[] = [];
-  if (gitlabTokenCheck.status === "valid") {
-    if (gitlabTokenCheck.username) {
-      gitlabDetails.push(
-        <p key="gitlab-auth-as">
-          {t("gitlab_authenticated_as", {
-            login: gitlabTokenCheck.username,
-          })}
-        </p>,
-      );
-    }
-
-    if (gitlabTokenCheck.name) {
-      gitlabDetails.push(
-        <p key="gitlab-auth-name">
-          {t("gitlab_authenticated_name", {
-            name: gitlabTokenCheck.name,
-          })}
-        </p>,
-      );
-    }
-
-    if (gitlabTokenCheck.diagnosticsLimited) {
-      gitlabDetails.push(
-        <p key="gitlab-limited-advice">
-          {t("gitlab_token_valid_limited_advice")}
-        </p>,
-      );
-    }
-  }
-
-  if (gitlabTokenCheck.status === "invalid_token") {
-    gitlabDetails.push(
-      <p key="gitlab-invalid-advice">{t("gitlab_invalid_token_advice")}</p>,
-    );
-  }
-
-  if (gitlabTokenCheck.status === "api_error") {
-    gitlabDetails.push(
-      <p key="gitlab-api-error-advice">
-        {t("gitlab_token_check_error_advice")}
-      </p>,
-    );
-  }
-
-  gitlabDetails.push(<p key="gitlab-api-note">{t("gitlab_api_limit_note")}</p>);
-
-  const isCodebergTokenSet = codebergTokenCheck.status !== "not_set";
-  const codebergTokenStatusText = isCodebergTokenSet
-    ? t("codeberg_token_set")
-    : t("codeberg_token_not_set");
-  const codebergTokenStatus: "success" | "warning" = isCodebergTokenSet
-    ? "success"
-    : "warning";
-
-  const codebergAuthStatus = (() => {
-    switch (codebergTokenCheck.status) {
-      case "not_set":
-        return { status: "warning" as const, text: t("unauth_access") };
-      case "valid":
-        return codebergTokenCheck.diagnosticsLimited
-          ? {
-              status: "warning" as const,
-              text: t("codeberg_token_valid_limited"),
-            }
-          : { status: "success" as const, text: t("auth_access_confirmed") };
-      case "invalid_token":
-        return { status: "error" as const, text: t("codeberg_token_invalid") };
-      case "api_error":
-        return {
-          status: "error" as const,
-          text: t("codeberg_token_check_error"),
-        };
-    }
-  })();
-
-  const codebergDetails: React.ReactNode[] = [];
-  if (codebergTokenCheck.status === "valid") {
-    if (codebergTokenCheck.login) {
-      codebergDetails.push(
-        <p key="codeberg-auth-as">
-          {t("codeberg_authenticated_as", {
-            login: codebergTokenCheck.login,
-          })}
-        </p>,
-      );
-    }
-
-    if (codebergTokenCheck.diagnosticsLimited) {
-      codebergDetails.push(
-        <p key="codeberg-limited-advice">
-          {t("codeberg_token_valid_limited_advice")}
-        </p>,
-      );
-    }
-  }
-
-  if (codebergTokenCheck.status === "invalid_token") {
-    codebergDetails.push(
-      <p key="codeberg-invalid-advice">{t("codeberg_invalid_token_advice")}</p>,
-    );
-  }
-
-  if (codebergTokenCheck.status === "api_error") {
-    codebergDetails.push(
-      <p key="codeberg-api-error-advice">
-        {t("codeberg_token_check_error_advice")}
-      </p>,
-    );
-  }
-
-  codebergDetails.push(
-    <p key="codeberg-api-limit">{t("codeberg_api_limit", { limit: 2000 })}</p>,
-  );
-
-  const handleEmailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const email = e.target.value;
-    setCustomEmail(email);
-    if (email.trim().length > 0) {
-      // Basic regex for email format validation
-      const isValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-      setIsEmailInvalid(!isValid);
-    } else {
-      setIsEmailInvalid(false); // Clear error if the field is empty
-    }
-  };
-
-  const handleSendTestEmail = () => {
-    if (isEmailInvalid) return;
-
-    startMailTransition(async () => {
-      try {
-        const result = await sendTestEmailAction(customEmail);
-        if (result.success) {
-          toast({
-            title: t("toast_email_success_title"),
-            description: t("toast_email_success_description"),
-          });
-        } else {
-          toast({
-            title: t("toast_email_error_title"),
-            description: result.error || t("toast_email_error_description"),
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_email_error_title"),
-          description: t("toast_email_error_description"),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
-  const handleSendTestApprisePackage = () => {
-    startApprisePackageTransition(async () => {
-      try {
-        const result = await sendTestApprisePackageAction();
-        if (result.success) {
-          toast({
-            title: t("toast_apprise_success_title"),
-            description: t("toast_apprise_package_success_description"),
-          });
-        } else {
-          toast({
-            title: t("toast_apprise_error_title"),
-            description: result.error,
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_apprise_error_title"),
-          description: t("toast_apprise_not_configured_error"),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
-  const handleSendTestApprise = () => {
-    startAppriseTransition(async () => {
-      try {
-        const result = await sendTestAppriseAction();
-        if (result.success) {
-          toast({
-            title: t("toast_apprise_success_title"),
-            description: t("toast_apprise_success_description"),
-          });
-        } else {
-          toast({
-            title: t("toast_apprise_error_title"),
-            description: result.error,
-            variant: "destructive",
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_apprise_error_title"),
-          description: t("toast_apprise_not_configured_error"),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
-  const handleManualUpdateCheck = () => {
-    startUpdateTransition(async () => {
-      try {
-        const result = await triggerAppUpdateCheckAction();
-        setUpdateNotice(result.notice);
-
-        if (result.notice.lastCheckError) {
-          toast({
-            title: t("toast_error_title"),
-            description: t("toast_update_error_description", {
-              error: result.notice.lastCheckError,
-            }),
-            variant: "destructive",
-          });
-          return;
-        }
-
-        if (result.notice.shouldNotify) {
-          toast({
-            title: t("toast_success_title"),
-            description: t("toast_update_available_description", {
-              version: result.notice.latestVersion ?? t("not_available"),
-            }),
-          });
-        } else {
-          toast({
-            title: t("toast_success_title"),
-            description: t("toast_update_not_available_description"),
-          });
-        }
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        const errorMessage =
-          error instanceof Error ? error.message : String(error ?? "unknown");
-        toast({
-          title: t("toast_error_title"),
-          description: t("toast_update_error_description", {
-            error: errorMessage,
-          }),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
-  const handleSetupTestRepo = () => {
-    startSetupRepoTransition(async () => {
-      try {
-        const result = await setupTestRepositoryAction();
-        toast({
-          title: result.success
-            ? t("toast_success_title")
-            : t("toast_error_title"),
-          description: result.message,
-          variant: result.success ? "default" : "destructive",
-        });
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_error_title"),
-          description: t("toast_setup_test_repo_error"),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
-  const handleTriggerReleaseCheck = () => {
-    startTriggerCheckTransition(async () => {
-      try {
-        const result = await triggerReleaseCheckAction();
-        toast({
-          title: result.success
-            ? t("toast_success_title")
-            : t("toast_error_title"),
-          description: result.message,
-          variant: result.success ? "default" : "destructive",
-        });
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        toast({
-          title: t("toast_error_title"),
-          description: t("toast_trigger_check_error"),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
-  const handleRefreshAppriseStatus = () => {
-    startAppriseCheckTransition(async () => {
-      try {
-        const status = await checkAppriseStatusAction();
-        setAppriseStatus(status);
-      } catch (error: unknown) {
-        if (reloadIfServerActionStale(error)) {
-          return;
-        }
-        // Keep previous state, just inform user.
-        toast({
-          title: t("toast_error_title"),
-          description: t("apprise_error"),
-          variant: "destructive",
-        });
-      }
-    });
-  };
-
+  const controller = useTestPageController({
+    rateLimitResult,
+    isTokenSet,
+    gitlabTokenCheck,
+    codebergTokenCheck,
+    forgejoTokenChecks,
+    notificationConfig,
+    appriseStatus: initialAppriseStatus,
+    updateNotice: initialUpdateNotice,
+    timeFormat,
+  });
+  const {
+    appriseStatus,
+    appriseUrlConfirmValue,
+    appriseUrlDialogOpen,
+    appriseUrlRevealError,
+    appriseUrlVariable,
+    codebergAuthStatus,
+    codebergDetails,
+    codebergTokenStatus,
+    codebergTokenStatusText,
+    customEmail,
+    emailInputId,
+    formattedLastChecked,
+    gitlabAuthStatus,
+    gitlabDetails,
+    gitlabTokenStatus,
+    gitlabTokenStatusText,
+    handleAppriseUrlToggle,
+    handleConfirmAppriseUrlReveal,
+    handleConfirmMailPasswordReveal,
+    handleEmailChange,
+    handleMailPasswordToggle,
+    handleManualUpdateCheck,
+    handlePasskeyStepUp,
+    handleRefreshAppriseStatus,
+    handleSecretRevealDialogOpenChange,
+    handleSendTestApprise,
+    handleSendTestEmail,
+    handleSetupTestRepo,
+    handleSocialStepUp,
+    handleTotpStepUp,
+    handleTriggerReleaseCheck,
+    isCheckingApprise,
+    isCheckingUpdate,
+    isEmailInvalid,
+    isOnline,
+    isRateLimitHigh,
+    isRevealingAppriseUrl,
+    isRevealingMailPassword,
+    isSendingApprise,
+    isSendingMail,
+    isSettingUpRepo,
+    isTriggeringCheck,
+    latestVersionText,
+    mailPasswordConfirmValue,
+    mailPasswordDialogOpen,
+    mailPasswordRevealError,
+    rateLimit,
+    rateLimitData,
+    rateLimitError,
+    resetTime,
+    revealedAppriseUrl,
+    revealedMailPassword,
+    secretRevealMethods,
+    secretRevealOptionsLoading,
+    secretRevealPendingMethod,
+    secretRevealStepUpError,
+    secretRevealTotpCode,
+    setAppriseUrlConfirmValue,
+    setMailPasswordConfirmValue,
+    setSecretRevealTotpCode,
+    updateNotice,
+    updateStatus,
+  } = controller;
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
       <Card>
@@ -571,7 +142,7 @@ export function TestPageClient({
             text={isTokenSet ? t("token_set") : t("token_not_set")}
           />
           {!isTokenSet && (
-            <p className="pl-7 text-sm text-muted-foreground">
+            <p className="ps-7 text-sm text-muted-foreground">
               {t("token_advice")}
             </p>
           )}
@@ -586,7 +157,7 @@ export function TestPageClient({
                     : t("unauth_access")
                 }
               />
-              <div className="mt-2 pl-7 text-sm text-muted-foreground space-y-1">
+              <div className="mt-2 ps-7 text-sm text-muted-foreground space-y-1">
                 <p>{t("api_limit", { limit: rateLimit?.limit ?? 0 })}</p>
                 <p>
                   {t("api_remaining", {
@@ -607,7 +178,7 @@ export function TestPageClient({
             />
           )}
           {isTokenSet && rateLimitError === "invalid_token" && (
-            <p className="pl-7 text-sm text-muted-foreground">
+            <p className="ps-7 text-sm text-muted-foreground">
               {t("invalid_token_advice")}
             </p>
           )}
@@ -630,7 +201,7 @@ export function TestPageClient({
             text={gitlabTokenStatusText}
           />
           {gitlabTokenCheck.status === "not_set" && (
-            <p className="pl-7 text-sm text-muted-foreground">
+            <p className="ps-7 text-sm text-muted-foreground">
               {t("gitlab_token_advice")}
             </p>
           )}
@@ -639,7 +210,7 @@ export function TestPageClient({
               status={gitlabAuthStatus.status}
               text={gitlabAuthStatus.text}
             />
-            <div className="mt-2 pl-7 text-sm text-muted-foreground space-y-1">
+            <div className="mt-2 ps-7 text-sm text-muted-foreground space-y-1">
               {gitlabDetails}
             </div>
           </div>
@@ -664,7 +235,7 @@ export function TestPageClient({
             text={codebergTokenStatusText}
           />
           {codebergTokenCheck.status === "not_set" && (
-            <p className="pl-7 text-sm text-muted-foreground">
+            <p className="ps-7 text-sm text-muted-foreground">
               {t("codeberg_token_advice")}
             </p>
           )}
@@ -673,10 +244,115 @@ export function TestPageClient({
               status={codebergAuthStatus.status}
               text={codebergAuthStatus.text}
             />
-            <div className="mt-2 pl-7 text-sm text-muted-foreground space-y-1">
+            <div className="mt-2 ps-7 text-sm text-muted-foreground space-y-1">
               {codebergDetails}
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <ForgejoBrandIcon className="size-8 text-muted-foreground" />
+            <div>
+              <CardTitle>{t("forgejo_card_title")}</CardTitle>
+              <CardDescription>{t("forgejo_card_description")}</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {forgejoTokenChecks.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {t("forgejo_no_instances")}
+            </p>
+          ) : (
+            forgejoTokenChecks.map((check) => {
+              const authStatus = (() => {
+                switch (check.status) {
+                  case "not_set":
+                    return check.connectivityError
+                      ? {
+                          status: "error" as const,
+                          text: t("forgejo_token_check_error"),
+                        }
+                      : {
+                          status: "success" as const,
+                          text: t("forgejo_connectivity_confirmed"),
+                        };
+                  case "valid":
+                    return check.diagnosticsLimited
+                      ? {
+                          status: "warning" as const,
+                          text: t("auth_access_confirmed"),
+                        }
+                      : {
+                          status: "success" as const,
+                          text: t("auth_access_confirmed"),
+                        };
+                  case "invalid_token":
+                    return {
+                      status: "error" as const,
+                      text: t("codeberg_token_invalid"),
+                    };
+                  case "api_error":
+                    return {
+                      status: "error" as const,
+                      text: t("forgejo_token_check_error"),
+                    };
+                }
+              })();
+
+              return (
+                <div
+                  key={check.baseUrl}
+                  className="space-y-3 border-t pt-4 first:border-t-0 first:pt-0"
+                >
+                  <p className="font-medium break-all">
+                    <bdi dir="ltr">{check.baseUrl}</bdi>
+                  </p>
+                  <StatusIndicator
+                    status={check.status === "not_set" ? "warning" : "success"}
+                    text={t(
+                      check.status === "not_set"
+                        ? "forgejo_token_not_set"
+                        : "forgejo_token_set",
+                    )}
+                  />
+                  {check.status === "not_set" && (
+                    <p className="ps-7 text-sm text-muted-foreground">
+                      {t("forgejo_token_advice")}
+                    </p>
+                  )}
+                  <StatusIndicator
+                    status={authStatus.status}
+                    text={authStatus.text}
+                  />
+                  <div className="ps-7 text-sm text-muted-foreground space-y-1">
+                    {check.status === "valid" && check.login ? (
+                      <p>
+                        {t("forgejo_authenticated_as", {
+                          login: check.login,
+                        })}
+                      </p>
+                    ) : null}
+                    {check.status === "valid" && check.fullName ? (
+                      <p>{check.fullName}</p>
+                    ) : null}
+                    {check.status === "valid" && check.diagnosticsLimited ? (
+                      <p>{t("forgejo_token_valid_limited_advice")}</p>
+                    ) : null}
+                    {check.status === "invalid_token" ? (
+                      <p>{t("forgejo_invalid_token_advice")}</p>
+                    ) : null}
+                    {check.status === "api_error" ? (
+                      <p>{t("forgejo_token_check_error_advice")}</p>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })
+          )}
         </CardContent>
       </Card>
 
@@ -695,10 +371,10 @@ export function TestPageClient({
             status={updateStatus.status}
             text={updateStatus.text}
           />
-          <div className="pl-7 text-sm text-muted-foreground space-y-1">
+          <div className="ps-7 text-sm text-muted-foreground space-y-1">
             <p>
               {t("update_current_version", {
-                version: updateNotice.currentVersion,
+                version: isolateLtrText(updateNotice.currentVersion),
               })}
             </p>
             <p>{formattedLastChecked}</p>
@@ -742,20 +418,60 @@ export function TestPageClient({
           ) : (
             <div>
               <StatusIndicator status="error" text={t("apprise_error")} />
-              <p className="pl-7 text-sm text-muted-foreground">
+              <p className="ps-7 text-sm text-muted-foreground">
                 {appriseStatus.error}
               </p>
             </div>
           )}
 
-          <p className="pl-7 break-all font-mono text-sm text-muted-foreground">
-            <span className="font-semibold text-foreground">APPRISE_URL=</span>
-            {notificationConfig.variables.APPRISE_URL ? (
-              <span>{notificationConfig.variables.APPRISE_URL}</span>
-            ) : (
-              <span className="italic">{t("email_not_set")}</span>
-            )}
-          </p>
+          {revealedAppriseUrl !== null && (
+            <div className="flex items-center gap-2 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm text-yellow-300">
+              <AlertTriangle className="size-5 shrink-0" />
+              <p>{t("apprise_url_warning")}</p>
+            </div>
+          )}
+          <div className="ps-7 flex items-center gap-2">
+            <p
+              dir="ltr"
+              className="grow break-all font-mono text-sm text-muted-foreground"
+            >
+              <span className="font-semibold text-foreground">
+                APPRISE_URL=
+              </span>
+              {appriseUrlVariable?.isSet &&
+              (revealedAppriseUrl || appriseUrlVariable.displayValue) ? (
+                <span>
+                  {revealedAppriseUrl ?? appriseUrlVariable.displayValue}
+                </span>
+              ) : (
+                <span className="italic">{t("email_not_set")}</span>
+              )}
+            </p>
+            {appriseUrlVariable?.isSet &&
+              appriseUrlVariable.revealMode !== "none" && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  disabled={isRevealingAppriseUrl}
+                  onClick={() =>
+                    handleAppriseUrlToggle(appriseUrlVariable.revealMode)
+                  }
+                  aria-label={t(
+                    revealedAppriseUrl ? "hide_secret" : "show_secret",
+                  )}
+                >
+                  {isRevealingAppriseUrl ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : revealedAppriseUrl ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </Button>
+              )}
+          </div>
           <div className="flex flex-col items-start gap-4 pt-2">
             <Button
               onClick={handleRefreshAppriseStatus}
@@ -788,24 +504,28 @@ export function TestPageClient({
               )}
               <span>{t("send_test_apprise_button")}</span>
             </Button>
-            <Button
-              onClick={handleSendTestApprisePackage}
-              disabled={
-                isSendingApprisePackage ||
-                appriseStatus.status !== "ok" ||
-                !isOnline
-              }
-              size="sm"
-              variant="outline"
-            >
-              {isSendingApprisePackage ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <Bell />
-              )}
-              <span>{t("send_test_apprise_package_button")}</span>
-            </Button>
           </div>
+          <SecretRevealDialog
+            target="apprise_url"
+            open={appriseUrlDialogOpen}
+            onOpenChange={(open) =>
+              handleSecretRevealDialogOpenChange("apprise_url", open)
+            }
+            methods={secretRevealMethods}
+            optionsLoading={secretRevealOptionsLoading}
+            totpCode={secretRevealTotpCode}
+            onTotpCodeChange={setSecretRevealTotpCode}
+            stepUpError={secretRevealStepUpError}
+            pendingMethod={secretRevealPendingMethod}
+            isRevealing={isRevealingAppriseUrl}
+            confirmValue={appriseUrlConfirmValue}
+            onConfirmValueChange={setAppriseUrlConfirmValue}
+            revealError={appriseUrlRevealError}
+            onConfirm={handleConfirmAppriseUrlReveal}
+            onTotp={() => handleTotpStepUp("apprise_url")}
+            onPasskey={() => handlePasskeyStepUp("apprise_url")}
+            onSocial={(provider) => handleSocialStepUp("apprise_url", provider)}
+          />
         </CardContent>
       </Card>
 
@@ -829,79 +549,113 @@ export function TestPageClient({
             }
           />
 
-          <div className="pl-7 pt-4 border-t space-y-3">
+          <div className="ps-7 pt-4 border-t space-y-3">
             <h4 className="font-semibold text-sm">
               {t("email_all_variables_title")}
             </h4>
 
-            {notificationConfig.variables.MAIL_PASSWORD && (
+            {revealedMailPassword !== null && (
               <div className="flex items-center gap-2 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 text-sm text-yellow-300">
                 <AlertTriangle className="size-5 shrink-0" />
                 <p>{t("email_password_warning")}</p>
               </div>
             )}
-            <div className="text-sm text-muted-foreground font-mono space-y-2 break-all">
-              {Object.entries(notificationConfig.variables).map(
-                ([key, value]) => {
-                  if (key === "APPRISE_URL") return null;
-                  const isRequired = requiredMailVars.includes(key);
-                  const isMissingAndRequired = isRequired && !value;
+            <div
+              dir="ltr"
+              className="text-sm text-muted-foreground font-mono space-y-2 break-all"
+            >
+              {notificationConfig.variables.map((variable) => {
+                if (variable.key === "APPRISE_URL") return null;
+                const isMissingAndRequired =
+                  variable.isRequired && !variable.isSet;
 
-                  if (key === "MAIL_PASSWORD" && value) {
-                    return (
-                      <div key={key} className="flex items-center gap-2">
-                        <p className="grow">
-                          <span className="font-semibold text-foreground">
-                            {key}=
-                          </span>
-                          <span>{isPasswordVisible ? value : "••••••••"}</span>
-                        </p>
+                if (variable.key === "MAIL_PASSWORD" && variable.isSet) {
+                  const isRevealed = revealedMailPassword !== null;
+                  const canReveal = variable.revealMode !== "none";
+                  return (
+                    <div key={variable.key} className="flex items-center gap-2">
+                      <p className="grow">
+                        <span className="font-semibold text-foreground">
+                          {variable.key}=
+                        </span>
+                        <span>
+                          {isRevealed
+                            ? revealedMailPassword
+                            : (variable.displayValue ?? "••••••••")}
+                        </span>
+                      </p>
+                      {canReveal && (
                         <Button
                           type="button"
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 shrink-0"
+                          disabled={isRevealingMailPassword}
                           onClick={() =>
-                            setIsPasswordVisible(!isPasswordVisible)
+                            handleMailPasswordToggle(variable.revealMode)
                           }
                           aria-label={t(
-                            isPasswordVisible
-                              ? "hide_password"
-                              : "show_password",
+                            isRevealed ? "hide_password" : "show_password",
                           )}
                         >
-                          {isPasswordVisible ? (
+                          {isRevealingMailPassword ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : isRevealed ? (
                             <EyeOff className="size-4" />
                           ) : (
                             <Eye className="size-4" />
                           )}
                         </Button>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <p key={key}>
-                      <span className="font-semibold text-foreground">
-                        {key}=
-                      </span>
-                      {value ? (
-                        <span>{value}</span>
-                      ) : (
-                        <span
-                          className={`italic ${
-                            isMissingAndRequired ? "text-yellow-500" : ""
-                          }`}
-                        >
-                          {t("email_not_set")}
-                        </span>
                       )}
-                    </p>
+                    </div>
                   );
-                },
-              )}
+                }
+
+                return (
+                  <p key={variable.key}>
+                    <span className="font-semibold text-foreground">
+                      {variable.key}=
+                    </span>
+                    {variable.isSet && variable.displayValue ? (
+                      <span>{variable.displayValue}</span>
+                    ) : (
+                      <span
+                        className={`italic ${
+                          isMissingAndRequired ? "text-yellow-500" : ""
+                        }`}
+                      >
+                        {t("email_not_set")}
+                      </span>
+                    )}
+                  </p>
+                );
+              })}
             </div>
           </div>
+
+          <SecretRevealDialog
+            target="mail_password"
+            open={mailPasswordDialogOpen}
+            onOpenChange={(open) =>
+              handleSecretRevealDialogOpenChange("mail_password", open)
+            }
+            methods={secretRevealMethods}
+            optionsLoading={secretRevealOptionsLoading}
+            totpCode={secretRevealTotpCode}
+            onTotpCodeChange={setSecretRevealTotpCode}
+            stepUpError={secretRevealStepUpError}
+            pendingMethod={secretRevealPendingMethod}
+            isRevealing={isRevealingMailPassword}
+            confirmValue={mailPasswordConfirmValue}
+            onConfirmValueChange={setMailPasswordConfirmValue}
+            revealError={mailPasswordRevealError}
+            onConfirm={handleConfirmMailPasswordReveal}
+            onTotp={() => handleTotpStepUp("mail_password")}
+            onPasskey={() => handlePasskeyStepUp("mail_password")}
+            onSocial={(provider) =>
+              handleSocialStepUp("mail_password", provider)
+            }
+          />
 
           <div className="pt-4 space-y-4">
             <div className="space-y-2">
@@ -935,9 +689,9 @@ export function TestPageClient({
                 }
               >
                 {isSendingMail ? (
-                  <Loader2 className="mr-2 animate-spin" />
+                  <Loader2 className="me-2 animate-spin" />
                 ) : (
-                  <Mail className="mr-2" />
+                  <Mail className="me-2" />
                 )}
                 {t("send_test_email_button")}
               </Button>
@@ -971,13 +725,14 @@ export function TestPageClient({
               {t("e2e_step1_description")}
             </p>
             <Button
+              data-testid="setup-test-repository"
               onClick={handleSetupTestRepo}
               disabled={isSettingUpRepo || !isOnline}
             >
               {isSettingUpRepo ? (
-                <Loader2 className="mr-2 animate-spin" />
+                <Loader2 className="me-2 animate-spin" />
               ) : (
-                <PackagePlus className="mr-2" />
+                <PackagePlus className="me-2" />
               )}
               {t("setup_test_repo_button")}
             </Button>
@@ -998,9 +753,9 @@ export function TestPageClient({
                 }
               >
                 {isTriggeringCheck ? (
-                  <Loader2 className="mr-2 animate-spin" />
+                  <Loader2 className="me-2 animate-spin" />
                 ) : (
-                  <RefreshCw className="mr-2" />
+                  <RefreshCw className="me-2" />
                 )}
                 {t("trigger_check_button")}
               </Button>

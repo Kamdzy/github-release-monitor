@@ -1,54 +1,52 @@
-import { test, expect } from '@playwright/test';
-import { ensureAppLocale } from './utils/locale';
+import { expect, type Page, test } from "./fixtures/ensureLoggedIn";
+import { waitForAutosave } from "./utils";
+import { ensureAppLocale } from "./utils/locale";
 
-const settingsPaths: Record<'en', string> = { en: '/en/settings' } as const;
-const settingsPathsLocale: Record<'en' | 'de', string> = {
-  en: '/en/settings',
-  de: '/de/einstellungen',
-};
-const homePaths: Record<'en' | 'de', string> = {
-  en: '/en',
-  de: '/de',
-};
-const timeFormatLabel = (locale: 'en' | 'de', variant: '12' | '24') => {
-  if (locale === 'en') {
-    return variant === '12' ? '12-hour' : '24-hour';
+async function setFormatAndRead(
+  page: Page,
+  locale: "en" | "ar",
+  variant: "12" | "24",
+) {
+  await page.goto(`/${locale}/settings`);
+  const formatOption = page.getByTestId(`time-format-${variant}h`);
+  if (!(await formatOption.isChecked())) {
+    await waitForAutosave(page, () => formatOption.click());
   }
-  return variant === '12' ? '12-Stunden' : '24-Stunden';
-};
-const lastUpdatedLocator = (page: any, locale: 'en' | 'de') =>
-  locale === 'en'
-    ? page.locator('span:text-matches("Last updated:", "i")')
-    : page.locator('span:text-matches("Letzte", "i")');
-
-async function setFormatAndRead(page: any, locale: 'en' | 'de', variant: '12' | '24') {
-  await page.goto(settingsPathsLocale[locale]);
-  await page.getByLabel(timeFormatLabel(locale, variant)).click();
-  await page.waitForTimeout(2000);
-  await page.goto(homePaths[locale]);
-  await expect(page).toHaveURL(new RegExp(`${locale === 'en' ? '/en' : '/de'}(\\/)?$`));
-  await page.waitForTimeout(500);
-  const text = await lastUpdatedLocator(page, locale).textContent();
-  return text || '';
+  await page.goto(`/${locale}`);
+  await expect(page).toHaveURL(new RegExp(`/${locale}$`));
+  const lastUpdated = page.getByTestId("last-updated");
+  await expect(lastUpdated).toBeVisible();
+  return (await lastUpdated.textContent()) ?? "";
 }
 
-test('time format toggles AM/PM in EN and updates in DE', async ({ page }) => {
-  await ensureAppLocale(page, 'en');
+// Locale-specific formatting is covered for every published locale by the
+// date-time unit tests. This E2E test only verifies the complete UI, autosave,
+// persistence, and rendering flow for representative LTR and RTL locales.
+test("time format setting persists across representative locales", async ({
+  page,
+}) => {
+  await ensureAppLocale(page, "en");
 
-  const en12 = await setFormatAndRead(page, 'en', '12');
+  const en12 = await setFormatAndRead(page, "en", "12");
   expect(en12).toMatch(/AM|PM/);
 
-  const en24 = await setFormatAndRead(page, 'en', '24');
+  const en24 = await setFormatAndRead(page, "en", "24");
   expect(en24).not.toMatch(/AM|PM/);
   expect(en24).toMatch(/\d{1,2}:\d{2}/);
+  expect(en24).not.toBe(en12);
 
-  await ensureAppLocale(page, 'de');
+  await page.reload();
+  await expect(page.getByTestId("last-updated")).toContainText(/\d{1,2}:\d{2}/);
+  await expect(page.getByTestId("last-updated")).not.toContainText(/AM|PM/);
 
-  const de24 = await setFormatAndRead(page, 'de', '24');
-  expect(de24).toMatch(/\d{1,2}:\d{2}/);
+  await ensureAppLocale(page, "ar");
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
 
-  const de12 = await setFormatAndRead(page, 'de', '12');
-  expect(de12).not.toBe(de24);
+  const ar12 = await setFormatAndRead(page, "ar", "12");
+  expect(ar12).toMatch(/(?:^|\s)[صم](?:\s|$)/u);
 
-  await ensureAppLocale(page, 'en');
+  const ar24 = await setFormatAndRead(page, "ar", "24");
+  expect(ar24).not.toMatch(/(?:^|\s)[صم](?:\s|$)/u);
+  expect(ar24).toMatch(/[0-9٠-٩]{1,2}:[0-9٠-٩]{2}/u);
+  expect(ar24).not.toBe(ar12);
 });

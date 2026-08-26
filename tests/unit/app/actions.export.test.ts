@@ -17,13 +17,24 @@ describe("getRepositoriesForExport", () => {
   it("returns data on success", async () => {
     await vi.doMock("@/lib/storage/repositories", () => ({
       getRepositories: async () => [
-        { id: "o/r", url: "https://github.com/o/r" },
+        {
+          id: "o/r",
+          url: "https://github.com/o/r",
+          displayName: "Production Monitor",
+          isPinned: true,
+          versionTagPattern: "^pkg/(?<version>\\d+\\.\\d+\\.\\d+)$",
+          pendingNotifications: [{ id: "internal-delivery" }],
+        },
       ],
     }));
     const { getRepositoriesForExport } = await import("@/app/actions");
     const res = await getRepositoriesForExport();
     expect(res.success).toBe(true);
     expect(res.data?.length).toBe(1);
+    expect(res.data?.[0]?.displayName).toBe("Production Monitor");
+    expect(res.data?.[0]?.isPinned).toBe(true);
+    expect(res.data?.[0]?.versionTagPattern).toContain("(?<version>");
+    expect(res.data?.[0]).not.toHaveProperty("pendingNotifications");
   });
 
   it("returns error when storage throws", async () => {

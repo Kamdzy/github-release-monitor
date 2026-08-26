@@ -22,6 +22,7 @@ const fetcherMocks = vi.hoisted(() => ({
   github: vi.fn(),
   gitlab: vi.fn(),
   codeberg: vi.fn(),
+  forgejo: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({
@@ -36,8 +37,12 @@ vi.mock("@/lib/releases/gitlab", () => ({
   fetchLatestReleaseFromGitLab: fetcherMocks.gitlab,
 }));
 
+// Codeberg and Forgejo are separate modules since the provider split.
 vi.mock("@/lib/releases/codeberg", () => ({
   fetchLatestReleaseFromCodeberg: fetcherMocks.codeberg,
+}));
+vi.mock("@/lib/releases/forgejo", () => ({
+  fetchLatestReleaseFromForgejo: fetcherMocks.forgejo,
 }));
 
 const globalSettings: AppSettings = {
@@ -58,6 +63,7 @@ describe("releases/cache", () => {
     fetcherMocks.github.mockResolvedValue(releaseResult);
     fetcherMocks.gitlab.mockResolvedValue(releaseResult);
     fetcherMocks.codeberg.mockResolvedValue(releaseResult);
+    fetcherMocks.forgejo.mockResolvedValue(releaseResult);
   });
 
   it("bypasses Next cache when requested", async () => {
@@ -150,6 +156,7 @@ describe("releases/cache", () => {
         "en",
         JSON.stringify(repoSettings),
         "42",
+        "newest",
         "3",
       ],
       {
@@ -198,6 +205,43 @@ describe("releases/cache", () => {
       "gitlab.com",
       "group",
       "project",
+      repoSettings,
+      globalSettings,
+      "en",
+    );
+  });
+
+  it("isolates cached Forgejo fetches by base URL and tag", async () => {
+    const { fetchLatestReleaseWithCache } = await import(
+      "@/lib/releases/cache"
+    );
+    const repoSettings: RepoSettingsForFetch = { cacheInterval: 2 };
+
+    await fetchLatestReleaseWithCache(
+      "forgejo",
+      "http://forgejo.internal.test:3000/code",
+      "owner",
+      "repo",
+      repoSettings,
+      globalSettings,
+      "en",
+    );
+
+    expect(cacheMocks.unstableCache).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.arrayContaining([
+        "forgejo-release-http://forgejo.internal.test:3000/code",
+        "forgejo",
+        "http://forgejo.internal.test:3000/code",
+        "owner",
+        "repo",
+      ]),
+      { revalidate: 120, tags: ["forgejo-releases"] },
+    );
+    expect(fetcherMocks.forgejo).toHaveBeenCalledWith(
+      "http://forgejo.internal.test:3000/code",
+      "owner",
+      "repo",
       repoSettings,
       globalSettings,
       "en",

@@ -1,24 +1,22 @@
 "use client";
 
-import {
-  FlaskConical,
-  Home,
-  Loader2,
-  LogIn,
-  LogOut,
-  Settings,
-} from "lucide-react";
+import { Loader2, LogIn, LogOut } from "lucide-react";
 import { useTranslations } from "next-intl";
 import * as React from "react";
 import { logout } from "@/app/auth/actions";
 import { GithubBrandIcon } from "@/components/icons/simple-brand-icon";
 import { Logo } from "@/components/logo";
+import {
+  defaultAuthAccess,
+  getNavLinks,
+  isNavLinkActive,
+} from "@/components/navigation-model";
 import { OfflineBanner } from "@/components/offline-banner";
 import { Button } from "@/components/ui/button";
 import { UpdateNoticeBanner } from "@/components/update-notice-banner";
 import { useNetworkStatus } from "@/hooks/use-network";
-import { Link, usePathname } from "@/i18n/navigation";
-import { pathnames } from "@/i18n/routing";
+import type { Locale } from "@/i18n/config";
+import { Link, usePathname, useRouter } from "@/i18n/navigation";
 import type { AuthAccess } from "@/lib/auth/mode";
 import { reloadIfServerActionStale } from "@/lib/server-action-error";
 import { cn } from "@/lib/utils";
@@ -26,27 +24,9 @@ import type { UpdateNotificationState } from "@/types";
 import { MobileMenu } from "./mobile-menu";
 
 type HeaderProps = {
-  locale: string;
+  locale: Locale;
   updateNotice?: UpdateNotificationState;
   authAccess?: AuthAccess;
-};
-
-type NavLink = {
-  href: keyof typeof pathnames;
-  label: string;
-  icon: typeof Home;
-  page: "home" | "settings" | "test";
-};
-
-const defaultAuthAccess: AuthAccess = {
-  authenticationMethod: "Basic",
-  isAuthenticated: true,
-  canMutate: true,
-  canAccessRestrictedPages: true,
-  showLogin: false,
-  showLogout: true,
-  showSettings: true,
-  showTest: true,
 };
 
 export function Header({
@@ -56,30 +36,16 @@ export function Header({
 }: HeaderProps) {
   const t = useTranslations("HomePage");
   const pathname = usePathname();
+  const router = useRouter();
   const [isLoggingOut, startLogoutTransition] = React.useTransition();
   const { isOnline } = useNetworkStatus();
-  const isNextRedirectError = (error: unknown) => {
-    if (!(error instanceof Error)) {
-      return false;
-    }
-    const digest =
-      typeof (error as { digest?: unknown }).digest === "string"
-        ? (error as { digest?: unknown }).digest
-        : undefined;
-    return (
-      error.message === "NEXT_REDIRECT" ||
-      (typeof digest === "string" && digest.startsWith("NEXT_REDIRECT"))
-    );
-  };
 
   const handleLogout = () => {
     startLogoutTransition(async () => {
       try {
-        await logout();
+        const result = await logout();
+        router.replace(result.redirectTo);
       } catch (error: unknown) {
-        if (isNextRedirectError(error)) {
-          return;
-        }
         if (reloadIfServerActionStale(error)) {
           return;
         }
@@ -88,71 +54,9 @@ export function Header({
     });
   };
 
-  const navLinks: NavLink[] = [
-    { href: "/", label: t("home_aria"), icon: Home, page: "home" },
-    ...(authAccess.showSettings
-      ? [
-          {
-            href: "/settings" as const,
-            label: t("settings_aria"),
-            icon: Settings,
-            page: "settings" as const,
-          },
-        ]
-      : []),
-    ...(authAccess.showTest
-      ? [
-          {
-            href: "/test" as const,
-            label: t("test_aria"),
-            icon: FlaskConical,
-            page: "test" as const,
-          },
-        ]
-      : []),
-  ];
-
-  const normalizePath = (path: string | null | undefined) => {
-    if (!path) {
-      return "/";
-    }
-
-    const localePrefix = `/${locale}`;
-    let normalized = path;
-
-    if (normalized === localePrefix) {
-      return "/";
-    }
-
-    if (normalized.startsWith(`${localePrefix}/`)) {
-      normalized = normalized.slice(localePrefix.length);
-    }
-
-    if (!normalized.startsWith("/")) {
-      normalized = `/${normalized}`;
-    }
-
-    if (normalized.length > 1 && normalized.endsWith("/")) {
-      normalized = normalized.slice(0, -1);
-    }
-
-    return normalized;
-  };
-
-  const isActive = (href: keyof typeof pathnames) => {
-    const currentPath = normalizePath(pathname);
-    const candidates = new Set<string>();
-
-    candidates.add(normalizePath(href));
-
-    const routeConfig = pathnames[href];
-    const localizedPath = routeConfig?.[locale as "en" | "de"];
-    if (localizedPath) {
-      candidates.add(normalizePath(localizedPath));
-    }
-
-    return candidates.has(currentPath);
-  };
+  const navLinks = getNavLinks(authAccess, t);
+  const isActive = (href: (typeof navLinks)[number]["href"]) =>
+    isNavLinkActive({ href, locale, pathname });
 
   return (
     <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur-xs">
@@ -172,42 +76,40 @@ export function Header({
 
           <div className="hidden items-center gap-2 md:flex">
             {navLinks.map((link) => (
-              <Link key={link.href} href={link.href} passHref>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={link.label}
-                  className={cn(isActive(link.href) && "bg-secondary")}
-                >
+              <Button
+                key={link.href}
+                asChild
+                variant="ghost"
+                size="icon"
+                className={cn(isActive(link.href) && "bg-secondary")}
+              >
+                <Link href={link.href} aria-label={link.label}>
                   <link.icon className="size-5" />
-                </Button>
-              </Link>
-            ))}
-            <a
-              href="https://github.com/iamspido/github-release-monitor"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label={t("github_aria")}
-            >
-              <Button variant="ghost" size="icon">
-                <GithubBrandIcon className="size-5" />
+                </Link>
               </Button>
-            </a>
+            ))}
+            <Button asChild variant="ghost" size="icon">
+              <a
+                href="https://github.com/iamspido/github-release-monitor"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={t("github_aria")}
+              >
+                <GithubBrandIcon className="size-5" />
+              </a>
+            </Button>
             {authAccess.showLogin && (
-              <Link href="/login" passHref>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t("login_aria")}
-                >
-                  <LogIn className="size-5" />
-                </Button>
-              </Link>
+              <Button asChild variant="ghost" size="icon">
+                <Link href="/login" aria-label={t("login_aria")}>
+                  <LogIn className="size-5 rtl:scale-x-[-1]" />
+                </Link>
+              </Button>
             )}
             {authAccess.showLogout && (
               <Button
                 variant="ghost"
                 size="icon"
+                data-testid="logout-button"
                 onClick={handleLogout}
                 disabled={isLoggingOut || !isOnline}
                 aria-label={t("logout_aria")}
@@ -215,7 +117,7 @@ export function Header({
                 {isLoggingOut ? (
                   <Loader2 className="size-5 animate-spin" />
                 ) : (
-                  <LogOut className="size-5" />
+                  <LogOut className="size-5 rtl:scale-x-[-1]" />
                 )}
               </Button>
             )}

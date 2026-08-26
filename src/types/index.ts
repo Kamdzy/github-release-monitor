@@ -1,3 +1,7 @@
+import type { Locale } from "@/i18n/config";
+
+export type { Locale } from "@/i18n/config";
+
 export type MonitoredItemType = "release" | "package";
 
 export type TagDigest = {
@@ -16,20 +20,31 @@ export type CachedTagChange = {
 
 export type Repository = {
   // Unique identifier for a monitored repository.
-  // Uses `<provider>:owner/repo` for GitHub/Codeberg,
-  // `gitlab:<host>/owner/repo` for GitLab,
-  // `ghcr:owner/package` for GHCR packages.
+  // Uses `<provider>:owner/repo` for GitHub/Codeberg and includes the
+  // configured instance location for self-hosted GitLab/Forgejo repositories.
+  // `ghcr:owner/package` is used for GHCR packages.
   id: string;
   url: string;
   type?: MonitoredItemType; // undefined or "release" for backward compat, "package" for GHCR
+  // Optional user-defined label used as the repository card heading.
+  displayName?: string;
   lastSeenReleaseTag?: string;
   isNew?: boolean;
   etag?: string;
   latestRelease?: CachedRelease;
+  // User-controlled priority that keeps the repository above unpinned ones.
+  isPinned?: boolean;
+  // User-defined labels used to organize and filter monitored repositories.
+  tags?: string[];
   // Per-repository settings override
-  // Empty arrays/undefined mean "use global setting"
+  // For pre-release sub-channels and custom markers, undefined inherits the
+  // global setting while an empty array explicitly disables the corresponding
+  // tag-name heuristics.
   releaseChannels?: ReleaseChannel[];
   preReleaseSubChannels?: PreReleaseChannelType[];
+  customPreReleaseMarkers?: string[];
+  releaseSelectionStrategy?: ReleaseSelectionStrategy;
+  versionTagPattern?: string;
   releasesPerPage?: number | null;
   refreshInterval?: number | null;
   cacheInterval?: number | null;
@@ -46,6 +61,39 @@ export type Repository = {
   monitoredTags?: string[]; // ["latest", "release", "stable"]
   tagDigests?: TagDigest[]; // last known digest per monitored tag
   latestTagChange?: CachedTagChange; // most recent change for display
+  pendingNotifications?: PendingReleaseNotification[];
+};
+
+export type NotificationChannel = "email" | "apprise";
+export type NotificationMode = "per_release" | "batch";
+
+export type PendingReleaseNotification = {
+  id: string;
+  batchId?: string;
+  repository: {
+    id: string;
+    url: string;
+    appriseTags?: string;
+    appriseFormat?: AppriseFormat;
+  };
+  release: GithubRelease;
+  locale: Locale;
+  settings: NotificationSettings;
+  channels: NotificationChannel[];
+  channelStates?: Partial<
+    Record<
+      NotificationChannel,
+      {
+        attempts: number;
+        nextAttemptAt?: string;
+        abandonedAt?: string;
+      }
+    >
+  >;
+  createdAt: string;
+  attempts: number;
+  nextAttemptAt?: string;
+  abandonedAt?: string;
 };
 
 export type GithubRelease = {
@@ -54,6 +102,9 @@ export type GithubRelease = {
   tag_name: string;
   name: string | null;
   body: string | null;
+  commit_links?: CommitLink[];
+  commit_links_resolved_at?: string;
+  commit_links_retry?: CommitLinksRetry;
   created_at: string;
   published_at: string | null;
   published_at_unknown?: boolean;
@@ -67,11 +118,26 @@ export type CachedRelease = {
   tag_name: string;
   name: string | null;
   body: string | null;
+  commit_links?: CommitLink[];
+  commit_links_resolved_at?: string;
+  commit_links_retry?: CommitLinksRetry;
   created_at: string;
   published_at: string | null;
   published_at_unknown?: boolean;
   fetched_at?: string;
   source?: "release" | "tag";
+};
+
+export type CommitLink = {
+  ref: string;
+  sha: string;
+  url: string;
+};
+
+export type CommitLinksRetry = {
+  attempts: number;
+  retry_at: string;
+  checked_refs?: string[];
 };
 
 export type FetchError = {
@@ -80,6 +146,7 @@ export type FetchError = {
     | "repo_not_found"
     | "no_releases_found"
     | "no_matching_releases"
+    | "no_matching_version_tags"
     | "invalid_url"
     | "api_error"
     | "not_modified"
@@ -94,8 +161,13 @@ export type EnrichedRelease = {
   isNew?: boolean;
   newEtag?: string | null;
   repoSettings?: {
+    displayName?: string;
+    isPinned?: boolean;
     releaseChannels?: ReleaseChannel[];
     preReleaseSubChannels?: PreReleaseChannelType[];
+    customPreReleaseMarkers?: string[];
+    releaseSelectionStrategy?: ReleaseSelectionStrategy;
+    versionTagPattern?: string;
     releasesPerPage?: number | null;
     refreshInterval?: number | null;
     cacheInterval?: number | null;
@@ -150,6 +222,18 @@ export type CodebergTokenCheckResult =
   | { status: "invalid_token" }
   | { status: "api_error" };
 
+export type ForgejoTokenCheckResult = { baseUrl: string } & (
+  | { status: "not_set"; connectivityError?: boolean }
+  | {
+      status: "valid";
+      login: string | null;
+      fullName: string | null;
+      diagnosticsLimited?: boolean;
+    }
+  | { status: "invalid_token" }
+  | { status: "api_error" }
+);
+
 export type GitlabTokenCheckResult =
   | { status: "not_set" }
   | {
@@ -164,9 +248,14 @@ export type GitlabTokenCheckResult =
 export type NotificationConfig = {
   isSmtpConfigured: boolean;
   isAppriseConfigured: boolean;
-  variables: {
-    [key: string]: string | null;
-  };
+  variables: Array<{
+    key: string;
+    displayValue: string | null;
+    isSet: boolean;
+    isRequired: boolean;
+    isSensitive: boolean;
+    revealMode: "none" | "external_click" | "password_confirm";
+  }>;
 };
 
 export type AppriseStatus = {
@@ -175,19 +264,15 @@ export type AppriseStatus = {
 };
 
 // App Settings
-export type Locale = "en" | "de";
 export type TimeFormat = "12h" | "24h";
 export type ReleaseChannel = "stable" | "prerelease" | "draft";
 export type PreReleaseChannelType =
-  | "a"
   | "alpha"
-  | "b"
   | "beta"
   | "canary"
   | "cr"
   | "dev"
   | "eap"
-  | "m"
   | "milestone"
   | "next"
   | "nightly"
@@ -199,15 +284,12 @@ export type PreReleaseChannelType =
   | "sp"
   | "tp";
 export const allPreReleaseTypes: PreReleaseChannelType[] = [
-  "a",
   "alpha",
-  "b",
   "beta",
   "canary",
   "cr",
   "dev",
   "eap",
-  "m",
   "milestone",
   "next",
   "nightly",
@@ -229,6 +311,13 @@ export const releaseSortOrders = [
   "provider_grouped",
 ] as const;
 export type ReleaseSortOrder = (typeof releaseSortOrders)[number];
+export const releaseSelectionStrategies = [
+  "newest",
+  "provider_latest",
+  "highest_version",
+] as const;
+export type ReleaseSelectionStrategy =
+  (typeof releaseSelectionStrategies)[number];
 export const repoProviderSortKeys = ["github", "gitlab", "codeberg"] as const;
 export type ReleaseProviderSortKey = (typeof repoProviderSortKeys)[number];
 export const defaultProviderSortOrder: ReleaseProviderSortKey[] = [
@@ -236,6 +325,16 @@ export const defaultProviderSortOrder: ReleaseProviderSortKey[] = [
   "gitlab",
   "codeberg",
 ];
+export const securityHighlightColorPresets = [
+  "yellow",
+  "red",
+  "orange",
+  "blue",
+  "purple",
+  "custom",
+] as const;
+export type SecurityHighlightColorPreset =
+  (typeof securityHighlightColorPresets)[number];
 
 export type AppSettings = {
   timeFormat: TimeFormat;
@@ -250,9 +349,16 @@ export type AppSettings = {
   parallelRepoFetches: number;
   releaseChannels: ReleaseChannel[];
   preReleaseSubChannels?: PreReleaseChannelType[];
+  customPreReleaseMarkers?: string[];
+  releaseSelectionStrategy?: ReleaseSelectionStrategy;
   releaseSortOrder?: ReleaseSortOrder;
   providerSortOrder?: ReleaseProviderSortKey[];
   prioritizeNewSecurityReleases?: boolean;
+  securityHighlightColorPreset?: SecurityHighlightColorPreset;
+  securityHighlightCustomColor?: string;
+  confirmSecurityAcknowledge?: boolean;
+  includeDefaultSecurityPatterns?: boolean;
+  customSecurityPatterns?: string;
   showAcknowledge?: boolean;
   showMarkAsNew?: boolean;
   showProviderPrefixInRepoId?: boolean;
@@ -260,25 +366,50 @@ export type AppSettings = {
   repositoryFormExpanded?: boolean;
   includeRegex?: string;
   excludeRegex?: string;
+  emailIncludeReleaseNotes?: boolean;
+  emailNotificationMode?: NotificationMode;
+  appriseIncludeReleaseNotes?: boolean;
+  appriseNotificationMode?: NotificationMode;
+  notificationMaxMessagesPerRun?: number;
+  notificationDeliveryConcurrency?: number;
   appriseMaxCharacters?: number;
   appriseTags?: string;
   appriseFormat?: AppriseFormat;
 };
 
+export type NotificationSettings = Pick<
+  AppSettings,
+  | "timeFormat"
+  | "emailIncludeReleaseNotes"
+  | "emailNotificationMode"
+  | "appriseIncludeReleaseNotes"
+  | "appriseNotificationMode"
+  | "notificationMaxMessagesPerRun"
+  | "notificationDeliveryConcurrency"
+  | "appriseMaxCharacters"
+  | "appriseTags"
+  | "appriseFormat"
+>;
+
 export type SystemStatus = {
   latestKnownVersion: string | null;
+  latestReleaseTitle: string | null;
+  latestReleaseIsSecurity: boolean | null;
+  latestSecurityVersion: string | null;
   lastCheckedAt: string | null;
-  latestEtag: string | null;
   dismissedVersion: string | null;
   lastCheckError: string | null;
 };
 
 export type UpdateNotificationState = {
   latestVersion: string | null;
+  latestReleaseTitle: string | null;
+  latestSecurityVersion: string | null;
   currentVersion: string;
   lastCheckedAt: string | null;
   lastCheckError: string | null;
   hasUpdate: boolean;
   isDismissed: boolean;
+  isSecurityUpdate: boolean;
   shouldNotify: boolean;
 };

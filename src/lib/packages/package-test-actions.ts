@@ -1,10 +1,10 @@
 "use server";
 
+import { getLocale, getTranslations } from "next-intl/server";
 import { sendPackageNotification } from "@/lib/notifications";
 import { log } from "@/lib/server-action-helpers";
 import { getSettings } from "@/lib/storage/settings";
 import type { Repository, TagDigest } from "@/types";
-import { getLocale, getTranslations } from "next-intl/server";
 
 export async function sendTestApprisePackageAction(): Promise<{
   success: boolean;

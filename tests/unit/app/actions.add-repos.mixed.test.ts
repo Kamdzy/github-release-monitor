@@ -13,6 +13,10 @@ vi.mock("next-intl/server", () => ({
   getLocale: async () => "en",
 }));
 
+vi.mock("@/lib/releases", () => ({
+  getLatestReleasesForRepos: async () => [],
+}));
+
 const mem: { repos: Repository[] } = { repos: [] };
 vi.mock("@/lib/storage/repositories", () => ({
   getRepositories: async () => mem.repos,
@@ -38,7 +42,7 @@ describe("addRepositoriesAction mixed inputs", () => {
       "urls",
       [
         "https://github.com/owner/repo", // duplicate existing
-        "https://example.com/not-github/abc", // invalid domain
+        "https://example.test/not-github/abc", // invalid domain
         "https://github.com/another/repo", // new valid
       ].join("\n"),
     );
@@ -60,7 +64,7 @@ describe("addRepositoriesAction mixed inputs", () => {
       "urls",
       [
         "https://github.com/owner/repo",
-        "https://example.com/not-github/abc",
+        "https://example.test/not-github/abc",
       ].join("\n"),
     );
     const res = await addRepositoriesAction({}, fd);
