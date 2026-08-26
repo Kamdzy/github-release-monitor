@@ -12,6 +12,8 @@ import {
   Workflow,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
+import * as React from "react";
+import { sendTestApprisePackageAction } from "@/app/actions";
 import { SecretRevealDialog } from "@/components/diagnostics/secret-reveal-dialog";
 import { StatusIndicator } from "@/components/diagnostics/status-indicator";
 import {
@@ -21,6 +23,7 @@ import {
   GitlabBrandIcon,
 } from "@/components/icons/simple-brand-icon";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 import {
   Card,
   CardContent,
@@ -49,6 +52,36 @@ export function TestPageClient({
   timeFormat,
 }: TestPageClientProps) {
   const t = useTranslations("TestPage");
+  const { toast } = useToast();
+  const [isSendingApprisePackage, startApprisePackageTransition] =
+    React.useTransition();
+
+  const handleSendTestApprisePackage = () => {
+    startApprisePackageTransition(async () => {
+      try {
+        const result = await sendTestApprisePackageAction();
+        if (result.success) {
+          toast({
+            title: t("toast_apprise_success_title"),
+            description: t("toast_apprise_package_success_description"),
+          });
+        } else {
+          toast({
+            title: t("toast_apprise_error_title"),
+            description: result.error ?? "",
+            variant: "destructive",
+          });
+        }
+      } catch (error) {
+        toast({
+          title: t("toast_apprise_error_title"),
+          description: error instanceof Error ? error.message : String(error),
+          variant: "destructive",
+        });
+      }
+    });
+  };
+
   const controller = useTestPageController({
     rateLimitResult,
     isTokenSet,
@@ -503,6 +536,23 @@ export function TestPageClient({
                 <Bell />
               )}
               <span>{t("send_test_apprise_button")}</span>
+            </Button>
+            <Button
+              onClick={handleSendTestApprisePackage}
+              disabled={
+                isSendingApprisePackage ||
+                appriseStatus.status !== "ok" ||
+                !isOnline
+              }
+              size="sm"
+              variant="outline"
+            >
+              {isSendingApprisePackage ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <PackagePlus />
+              )}
+              <span>{t("send_test_apprise_package_button")}</span>
             </Button>
           </div>
           <SecretRevealDialog

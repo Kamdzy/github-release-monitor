@@ -1,12 +1,23 @@
 "use client";
 
-import { ChevronDown, Loader2, Plus, Upload, X } from "lucide-react";
+import {
+  ChevronDown,
+  Loader2,
+  PackagePlus,
+  Plus,
+  Upload,
+  X,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import * as React from "react";
 import { useActionState } from "react";
 
-import { addRepositoriesAction } from "@/app/actions";
+import {
+  addPackagesAction,
+  addRepositoriesAction,
+} from "@/app/actions";
+import { Input } from "@/components/ui/input";
 import { RepositoryTagPicker } from "@/components/repository-tag-picker";
 import {
   AlertDialog,
@@ -90,6 +101,7 @@ export function RepositoryForm({
   onToggleExpanded,
 }: RepositoryFormProps) {
   const t = useTranslations("RepositoryForm");
+  const tp = useTranslations("PackageForm");
   const contentId = React.useId();
   const tagsInputId = React.useId();
   const [urls, setUrls] = React.useState("");
@@ -213,6 +225,60 @@ export function RepositoryForm({
     onError: handleJobError,
     onTimeout: handleJobTimeout,
     onDone: handleJobDone,
+  });
+
+  // ─── GHCR package add form (Kamdzy fork) ────────────────────────────────
+  const [packageUrls, setPackageUrls] = React.useState("");
+  const [packageTags, setPackageTags] = React.useState("");
+  const [pkgJobId, setPkgJobId] = React.useState<string | undefined>();
+  const hasPkgProcessedResult = React.useRef(false);
+  const [pkgState, pkgFormAction, isPkgPending] = useActionState(
+    addPackagesAction,
+    {} as Awaited<ReturnType<typeof addPackagesAction>>,
+  );
+
+  React.useEffect(() => {
+    if (isPkgPending) {
+      hasPkgProcessedResult.current = false;
+    }
+  }, [isPkgPending]);
+
+  React.useEffect(() => {
+    if (hasPkgProcessedResult.current) return;
+    if (pkgState.error) {
+      toast({
+        title: tp("toast_generic_error"),
+        description: pkgState.error,
+        variant: "destructive",
+      });
+      hasPkgProcessedResult.current = true;
+      return;
+    }
+    if (pkgState.toast) {
+      toast({
+        title: pkgState.toast.title,
+        description: pkgState.toast.description,
+      });
+      hasPkgProcessedResult.current = true;
+    }
+    if (pkgState.success) {
+      setPackageUrls("");
+      if (pkgState.jobId) setPkgJobId(pkgState.jobId);
+    }
+  }, [pkgState, tp, toast]);
+
+  const handlePkgJobDone = React.useCallback(() => {
+    setPkgJobId(undefined);
+    router.refresh();
+  }, [router]);
+  const noop = React.useCallback(() => {}, []);
+
+  useJobPolling({
+    jobId: pkgJobId,
+    onComplete: noop,
+    onError: noop,
+    onTimeout: noop,
+    onDone: handlePkgJobDone,
   });
 
   React.useEffect(() => {
@@ -461,6 +527,63 @@ export function RepositoryForm({
             </CardContent>
           </div>
         </div>
+      </Card>
+
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle>{tp("title")}</CardTitle>
+          <CardDescription>{tp("description")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form action={pkgFormAction} className="grid w-full gap-3">
+            <Textarea
+              dir="ltr"
+              name="urls"
+              placeholder={tp("placeholder")}
+              value={packageUrls}
+              onChange={(e) => setPackageUrls(e.target.value)}
+              rows={3}
+              wrap="off"
+              className="resize-none overflow-y-auto overflow-x-auto max-h-60"
+              disabled={isPkgPending || !!pkgJobId || !isOnline}
+            />
+            <div>
+              <label
+                htmlFor="pkg-tags"
+                className="text-sm font-medium mb-1 block"
+              >
+                {tp("tags_label")}
+              </label>
+              <Input
+                id="pkg-tags"
+                name="tags"
+                placeholder={tp("tags_placeholder")}
+                value={packageTags}
+                onChange={(e) => setPackageTags(e.target.value)}
+                disabled={isPkgPending || !!pkgJobId || !isOnline}
+              />
+            </div>
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                disabled={
+                  !packageUrls.trim() ||
+                  !packageTags.trim() ||
+                  isPkgPending ||
+                  !!pkgJobId ||
+                  !isOnline
+                }
+              >
+                {isPkgPending || pkgJobId ? (
+                  <Loader2 className="me-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <PackagePlus className="me-2 h-4 w-4" />
+                )}
+                {tp("button_add")}
+              </Button>
+            </div>
+          </form>
+        </CardContent>
       </Card>
 
       <AlertDialog
